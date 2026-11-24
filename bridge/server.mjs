@@ -345,7 +345,7 @@ const enforcePolicy = async (input) => {
  * for chrome_* tools first when there are none costs a failed turn, and every
  * section is input tokens on every turn.
  */
-const PROMPT_CORE = `You are JARVIS. You are speaking out loud to one person.
+const PROMPT_CORE = `You are SAJI, the user's personal assistant. If anyone asks your name, it is Saji. You are speaking out loud to one person.
 
 LENGTH. Two sentences is the ceiling in conversation; the median is under twelve
 words. Every word is read aloud and the user waits in silence while it plays, so
@@ -1541,7 +1541,7 @@ wss.on('connection', (socket) => {
               // Every word of this can end up spoken, so it carries no command
               // to read out — the persona is forbidden from saying one aloud.
               message:
-                'Blocked: JARVIS is running in read-only mode and cannot take' +
+                'Blocked: SAJI is running in read-only mode and cannot take' +
                 ' actions that change anything. Tell the user this action is' +
                 ' unavailable until they enable write access on the machine.',
             }

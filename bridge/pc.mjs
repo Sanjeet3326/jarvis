@@ -162,7 +162,7 @@ export function pcServer({ heard }) {
     name: 'jarvis_pc',
     version: '1.0.0',
     instructions:
-      'Control of the Windows PC JARVIS runs on: apps, volume, media, brightness, screenshot, lock, ' +
+      'Control of the Windows PC SAJI runs on: apps, volume, media, brightness, screenshot, lock, ' +
       'battery/status, finding and opening the user\'s files, folders, Recycle Bin and power. ' +
       'pc_recycle and pc_power (except cancel) require the user\'s spoken yes via a confirmation code.',
     alwaysLoad: true,
@@ -270,14 +270,14 @@ Start-Process ("shell:AppsFolder\\" + $best[0].id)
 
     tool(
       'pc_close_app',
-      'Close an app\'s windows politely, as if its close button were clicked — it can still ask to save. Matches the app or window name ("Spotify", "Notepad", "Word"). Cannot close JARVIS or the Windows shell.',
+      'Close an app\'s windows politely, as if its close button were clicked — it can still ask to save. Matches the app or window name ("Spotify", "Notepad", "Word"). Cannot close SAJI or the Windows shell.',
       { name: z.string().min(2).max(80) },
       guard(async ({ name }) => {
         const out = await ps(
           `
 $q = $env:JP_NAME.ToLower().Trim()
 $skip = 'electron','explorer','dwm','winlogon','csrss','svchost','lsass','services','system','idle','powershell','node'
-$p = Get-Process | ? { $_.MainWindowHandle -ne 0 -and $skip -notcontains $_.ProcessName.ToLower() -and $_.MainWindowTitle -ne 'J.A.R.V.I.S.' -and ($_.ProcessName.ToLower().Contains($q.Replace(' ','')) -or $_.MainWindowTitle.ToLower().Contains($q)) }
+$p = Get-Process | ? { $_.MainWindowHandle -ne 0 -and $skip -notcontains $_.ProcessName.ToLower() -and $_.MainWindowTitle -notin 'J.A.R.V.I.S.','S.A.J.I.' -and ($_.ProcessName.ToLower().Contains($q.Replace(' ','')) -or $_.MainWindowTitle.ToLower().Contains($q)) }
 $closed = @($p | % { $null = $_.CloseMainWindow(); "$($_.ProcessName): $($_.MainWindowTitle)" })
 @{ closed=$closed } | ConvertTo-Json -Compress`,
           { NAME: name },
@@ -345,7 +345,7 @@ if ($env:JP_LEVEL) { Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBr
 
     tool(
       'pc_screenshot',
-      'Take a screenshot of the whole screen and save it to Pictures\\JARVIS. Returns where it was saved.',
+      'Take a screenshot of the whole screen and save it to Pictures\\SAJI. Returns where it was saved.',
       {},
       guard(async () => {
         const out = await ps(`
@@ -355,7 +355,7 @@ Add-Type -Namespace JP -Name Dpi -MemberDefinition '[DllImport("user32.dll")] pu
 $r = [System.Windows.Forms.SystemInformation]::VirtualScreen
 $bmp = New-Object System.Drawing.Bitmap $r.Width, $r.Height
 $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size); $g.Dispose()
-$dir = Join-Path ([Environment]::GetFolderPath('MyPictures')) 'JARVIS'; New-Item -ItemType Directory -Force $dir | Out-Null
+$dir = Join-Path ([Environment]::GetFolderPath('MyPictures')) 'SAJI'; New-Item -ItemType Directory -Force $dir | Out-Null
 $file = Join-Path $dir ("screenshot-" + (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss') + ".png")
 $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
 $file`)

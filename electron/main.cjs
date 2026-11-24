@@ -13,7 +13,7 @@
  * Everything the bridge and the face print goes to logs/desktop.log.
  */
 
-const { app, BrowserWindow, Tray, Menu, globalShortcut, session, dialog, nativeImage, shell } = require('electron')
+const { app, BrowserWindow, Tray, Menu, globalShortcut, session, dialog, nativeImage, shell, ipcMain } = require('electron')
 const { spawn, execFileSync } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -27,7 +27,9 @@ const URL = `http://localhost:${PORT}/`
 const HOTKEYS = ['Control+Space', 'Control+Alt+J']
 
 const argv = process.argv.slice(1)
-const startHidden = argv.includes('--hidden')
+/** Always on, out of sight: the window only comes up when you say "Hey Saji"
+ *  (or use Ctrl+Space / the tray). --show opens it straight away instead. */
+const startHidden = !argv.includes('--show')
 const writes = argv.includes('--writes') || process.env.JARVIS_ALLOW_WRITES === '1'
 
 // Audio and speech without a click first: this is a voice assistant on your own
@@ -48,7 +50,7 @@ function log(tag, data) {
   const lines = data.toString().split(/\r?\n/).filter(Boolean)
   for (const l of lines) logFile.write(`${new Date().toLocaleTimeString('en-GB')} ${tag} ${l}\n`)
 }
-log('app', `--- JARVIS desktop starting (writes ${writes ? 'ON' : 'off'}) ---`)
+log('app', `--- SAJI desktop starting (writes ${writes ? 'ON' : 'off'}) ---`)
 
 // ---------------------------------------------------------------- children
 
@@ -78,7 +80,7 @@ function run(tag, args, env) {
     log(tag, `exited (${code})`)
     if (quitting) return
     dialog.showErrorBox(
-      'JARVIS stopped',
+      'SAJI stopped',
       `The ${tag} stopped unexpectedly (code ${code}).\n\n` +
         'If `npm start` is running in a terminal, close it first — both use the same port.\n\n' +
         `Details: ${path.join(ROOT, 'logs', 'desktop.log')}`,
@@ -131,7 +133,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     show: false,
-    title: 'J.A.R.V.I.S.',
+    title: 'S.A.J.I.',
     icon: path.join(__dirname, 'icon.png'),
     backgroundColor: '#000000',
     autoHideMenuBar: true,
@@ -139,6 +141,8 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Lets the page ask to appear on "Hey Saji" and hide when quiet.
+      preload: path.join(__dirname, 'preload.cjs'),
       // Keep listening for "Hey Saji" while minimised or in the tray. Without
       // this Chromium throttles a hidden page and the wake word goes deaf.
       backgroundThrottling: false,
@@ -147,14 +151,15 @@ function createWindow() {
 
   win.on('close', (e) => {
     if (quitting) return
-    // Closing hides to the tray; JARVIS keeps listening.
+    // Closing hides to the tray; Saji keeps listening.
     e.preventDefault()
+    win.setAlwaysOnTop(false)
     win.hide()
     if (!hintedTray && tray) {
       hintedTray = true
       tray.displayBalloon({
         iconType: 'info',
-        title: 'JARVIS is still listening',
+        title: 'SAJI is still listening',
         content: 'Say "Hey Saji", press Ctrl+Space, or use the tray icon. Right-click it to quit.',
       })
     }
@@ -204,9 +209,36 @@ async function autoInitialise() {
 function show() {
   if (!win) return
   if (win.isMinimized()) win.restore()
+  win.setAlwaysOnTop(false)
   win.show()
   win.focus()
 }
+
+/**
+ * Up on "Hey Saji": in front of everything, but without taking the keyboard
+ * from whatever you were typing in.
+ */
+function pop() {
+  if (!win) return
+  if (win.isMinimized()) win.restore()
+  win.setAlwaysOnTop(true, 'floating')
+  if (!win.isVisible()) win.showInactive()
+  win.moveTop()
+}
+
+/** Away again once the conversation is over — unless you are using it. */
+function unpop() {
+  if (!win || !win.isVisible() || win.isFocused()) return
+  win.setAlwaysOnTop(false)
+  win.hide()
+}
+
+ipcMain.on('saji:show', (e) => {
+  if (e.sender === win?.webContents) pop()
+})
+ipcMain.on('saji:hide', (e) => {
+  if (e.sender === win?.webContents) unpop()
+})
 
 function toggle() {
   if (!win) return
@@ -227,10 +259,10 @@ function startsWithWindows() {
 
 function buildTray() {
   tray = new Tray(nativeImage.createFromPath(path.join(__dirname, 'tray.png')))
-  tray.setToolTip('J.A.R.V.I.S. — say "Hey Saji"')
+  tray.setToolTip('SAJI — say "Hey Saji"')
   const menu = () =>
     Menu.buildFromTemplate([
-      { label: 'Show JARVIS', click: show },
+      { label: 'Show SAJI', click: show },
       { label: `Shortcut: ${hotkey ?? 'none'}`, enabled: false },
       { label: 'PC controls: on (risky ones ask first)', enabled: false },
       { label: writes ? 'Shell and file writes: ON' : 'Shell and file writes: off', enabled: false },
@@ -247,11 +279,13 @@ function buildTray() {
       { label: 'Open log', click: () => void shell.openPath(path.join(ROOT, 'logs', 'desktop.log')) },
       { label: 'Reload', click: () => win?.reload() },
       { type: 'separator' },
-      { label: 'Quit JARVIS', click: quit },
+      { label: 'Quit SAJI', click: quit },
     ])
+  trayMenu = menu
   tray.setContextMenu(menu())
   tray.on('click', toggle)
 }
+let trayMenu = null
 
 let hotkey = null
 function registerHotkey() {
@@ -296,10 +330,28 @@ app.whenReady().then(async () => {
   try {
     await waitForFace()
   } catch (err) {
-    dialog.showErrorBox('JARVIS could not start', `${err.message}.\n\nSee ${path.join(ROOT, 'logs', 'desktop.log')}`)
+    dialog.showErrorBox('SAJI could not start', `${err.message}.\n\nSee ${path.join(ROOT, 'logs', 'desktop.log')}`)
     return quit()
   }
   createWindow()
+
+  // Always on means starting with Windows. Done once, on the first run; the
+  // tray's "Start with Windows" turns it off for good.
+  const marker = path.join(app.getPath('userData'), 'autostart-set')
+  if (!fs.existsSync(marker)) {
+    app.setLoginItemSettings({ ...AUTOSTART(), openAtLogin: true })
+    fs.writeFileSync(marker, new Date().toISOString())
+    log('app', 'set to start with Windows')
+    if (tray && trayMenu) tray.setContextMenu(trayMenu())
+  }
+
+  if (startHidden && !argv.includes('--quiet')) {
+    tray?.displayBalloon({
+      iconType: 'info',
+      title: 'Saji is on',
+      content: 'Say "Hey Saji" whenever you need me. Ctrl+Space opens the window.',
+    })
+  }
 })
 
 // Hidden in the tray is still running.

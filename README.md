@@ -83,10 +83,18 @@ Click **INITIALISE**, allow the microphone when asked, and say **"Hey Jarvis"**.
 ### As a desktop app (Windows)
 
 ```bash
-npm run desktop              # open JARVIS in its own window
+npm run desktop              # start Saji (hidden in the tray until you say "Hey Saji")
 npm run desktop:writes       # same, with PC actions allowed
-npm run desktop:shortcut     # put a JARVIS icon on the desktop and Start menu
+npm run desktop:shortcut     # put a SAJI icon on the desktop and Start menu
 ```
+
+In the app the assistant is called **Saji**. It is always on and out of sight:
+it starts hidden in the tray (and, from the first run, with Windows), the
+window comes up on top when you say "Hey Saji" without taking the keyboard
+from what you were doing, and it hides again about five seconds after the
+conversation goes quiet, unless you have clicked into it. Only the animation
+shows: the title wordmark is off (`brand` in `src/store.ts`). Pass `--show` to
+open the window straight away.
 
 The app (`electron/main.cjs`) starts the bridge and the face itself, presses
 INITIALISE for you, and keeps listening when the window is closed: it lives

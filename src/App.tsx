@@ -7,6 +7,8 @@ import { Diagnostics } from './ui/Diagnostics'
 import { VoiceLock } from './ui/VoiceLock'
 import * as voiceLock from './lib/speaker'
 import * as wakeword from './lib/wakeword'
+// Desktop app only: show the window on "Hey Saji", hide it when quiet.
+import './lib/desktop'
 import { useStore } from './store'
 import { startVoice, CALL_AT_START, type Voice, type VoiceMode } from './lib/voice'
 import { createSpeaker, cycleVoice, currentVoiceName } from './lib/tts'

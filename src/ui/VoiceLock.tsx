@@ -153,8 +153,8 @@ export function VoiceLock() {
       else
         setNote(
           s >= speaker.threshold()
-            ? `✓ Recognised (${s.toFixed(2)} ≥ ${speaker.threshold().toFixed(2)}). JARVIS would answer this voice.`
-            : `✗ Not recognised (${s.toFixed(2)} < ${speaker.threshold().toFixed(2)}). JARVIS would ignore this voice.`,
+            ? `✓ Recognised (${s.toFixed(2)} ≥ ${speaker.threshold().toFixed(2)}). SAJI would answer this voice.`
+            : `✗ Not recognised (${s.toFixed(2)} < ${speaker.threshold().toFixed(2)}). SAJI would ignore this voice.`,
         )
     } catch (err) {
       setNote(`Test failed: ${(err as Error)?.message ?? err}`)
@@ -216,7 +216,7 @@ export function VoiceLock() {
   const forget = () => {
     speaker.forget()
     setSamples([])
-    setNote('Voiceprint deleted. JARVIS answers anyone again.')
+    setNote('Voiceprint deleted. SAJI answers anyone again.')
   }
 
   const left = (endsAt: number) => Math.max(0, (endsAt - Date.now()) / 1000).toFixed(1)
@@ -230,7 +230,7 @@ export function VoiceLock() {
       <div className="diag-head">VOICE LOCK · L to close</div>
 
       <div className={d.enrolled ? 'diag-ok' : 'diag-bad'}>
-        {d.enrolled ? '● ON — only your voice is answered' : '● OFF — anyone can talk to JARVIS'}
+        {d.enrolled ? '● ON — only your voice is answered' : '● OFF — anyone can talk to SAJI'}
       </div>
       <div className="vlock-model">
         model:{' '}
@@ -243,7 +243,7 @@ export function VoiceLock() {
 
       <div className="diag-sec">{d.enrolled ? 'RE-RECORD YOUR VOICE' : 'RECORD YOUR VOICE'}</div>
       <p className="vlock-help">
-        Sit where you normally talk to JARVIS. Press Record and read the line out loud in your
+        Sit where you normally talk to SAJI. Press Record and read the line out loud in your
         normal voice. Any language works.
       </p>
 

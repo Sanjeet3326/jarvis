@@ -15,8 +15,8 @@ if ($Writes) { $arguments += ' --writes' }
 
 $shell = New-Object -ComObject WScript.Shell
 $targets = @(
-  (Join-Path ([Environment]::GetFolderPath('Desktop')) 'JARVIS.lnk'),
-  (Join-Path ([Environment]::GetFolderPath('Programs')) 'JARVIS.lnk')
+  (Join-Path ([Environment]::GetFolderPath('Desktop')) 'SAJI.lnk'),
+  (Join-Path ([Environment]::GetFolderPath('Programs')) 'SAJI.lnk')
 )
 foreach ($t in $targets) {
   $lnk = $shell.CreateShortcut($t)
@@ -24,7 +24,7 @@ foreach ($t in $targets) {
   $lnk.Arguments = $arguments
   $lnk.WorkingDirectory = $root
   $lnk.IconLocation = (Join-Path $root 'electron\icon.ico')
-  $lnk.Description = 'J.A.R.V.I.S. - say "Hey Saji"'
+  $lnk.Description = 'SAJI - say "Hey Saji"'
   $lnk.Save()
   Write-Output "created $t"
 }
