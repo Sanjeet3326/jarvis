@@ -95,11 +95,6 @@ async function loadOverrides() {
   )
 }
 
-export function setVolume(v: number) {
-  volume = Math.max(0, Math.min(1, v))
-  if (master) rampTo(master.gain, ducked ? volume * DUCK : volume, 0.05)
-}
-
 // ---------------------------------------------------------------------------
 // Synthesis helpers
 // ---------------------------------------------------------------------------
@@ -263,20 +258,6 @@ export function startAmbient() {
   source.start()
   ambient = { source, gain }
   rampTo(gain.gain, BED, 3)
-}
-
-export function stopAmbient() {
-  if (!ambient || !ctx) return
-  const { source, gain } = ambient
-  ambient = null
-  rampTo(gain.gain, 0, 0.6)
-  // Stop the node itself once it's inaudible, or it keeps a buffer looping in
-  // the graph for as long as the page is open.
-  setTimeout(() => {
-    source.stop()
-    source.disconnect()
-    gain.disconnect()
-  }, 800)
 }
 
 /**

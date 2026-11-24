@@ -28,7 +28,7 @@ import { mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import { openRemote, proxyError, vetTarget, PROXY_UA } from './net.mjs'
-import { probeUrl, renderPage } from './page.mjs'
+import { renderPage } from './page.mjs'
 import {
   builtinTools,
   checkToolUse,
@@ -162,7 +162,7 @@ function hostAllowed(host) {
  *
  * Read-only and generative tools run freely. Anything that writes to disk,
  * runs a shell, or changes the world waits for JARVIS_ALLOW_WRITES=1 (or the
- * --writes flag, which `npm run bridge:writes` passes — a flag works in every
+ * --writes flag, which `npm run start:writes` passes — a flag works in every
  * shell, where an inline env assignment does not run on Windows). Start
  * without it, and turn it on once you trust what you're demoing.
  */

@@ -6,8 +6,8 @@
  * terminal, so JARVIS opens from a desktop icon, lives in the system tray, can
  * start with Windows and keeps listening while its window is hidden.
  *
- *   npm run desktop                 open it
- *   npm run desktop -- --writes     let it take real actions on this PC
+ *   npm start                       run it (hidden until "Hey Saji")
+ *   npm run start:writes            also allow shell and file writes
  *   ... --hidden                    start in the tray (used by "Start with Windows")
  *
  * Everything the bridge and the face print goes to logs/desktop.log.
@@ -99,6 +99,25 @@ function killChildren() {
     } catch {
       try { c.kill() } catch { /* gone */ }
     }
+  }
+}
+
+/**
+ * Put MediaPipe's hand-tracking WebAssembly where the page can load it: out of
+ * node_modules into public/, served from our own origin (the page's CSP allows
+ * no CDN). 34 MB of build output, so it stays out of git and is copied here
+ * whenever it is missing; free after the first run.
+ */
+function vendorHandTracking() {
+  const from = path.join(ROOT, 'node_modules', '@mediapipe', 'tasks-vision', 'wasm')
+  const to = path.join(ROOT, 'public', 'mediapipe')
+  if (!fs.existsSync(from) || fs.existsSync(path.join(to, 'vision_wasm_internal.wasm'))) return
+  try {
+    fs.mkdirSync(to, { recursive: true })
+    fs.cpSync(from, to, { recursive: true })
+    log('app', 'copied the hand-tracking runtime into public/mediapipe')
+  } catch (err) {
+    log('app', `could not copy the hand-tracking runtime: ${err.message}`)
   }
 }
 
@@ -347,6 +366,7 @@ app.whenReady().then(async () => {
   registerHotkey()
   buildTray()
 
+  vendorHandTracking()
   run('bridge', ['bridge/server.mjs'], writes ? { JARVIS_ALLOW_WRITES: '1' } : {})
   run('face', ['node_modules/vite/bin/vite.js', '--port', String(PORT), '--strictPort'], { PORT: String(PORT) })
 

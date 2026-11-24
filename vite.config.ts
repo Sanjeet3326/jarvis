@@ -7,7 +7,7 @@ import { basename, join } from 'node:path'
  * Serve the ONNX runtime the voice lock runs its model on, from our own origin.
  *
  * transformers.js imports it from jsDelivr by default, which the CSP in
- * index.html refuses (no CDN in script-src, for the reasons scripts/start.mjs
+ * index.html refuses (no CDN in script-src, for the reasons electron/main.cjs
  * gives for MediaPipe) — so the lock would never get a model and, being
  * fail-closed, would ignore everyone. Copying it into public/ does not work
  * either: Vite will not let code import a file from public/. So it is served

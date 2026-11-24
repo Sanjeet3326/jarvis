@@ -139,9 +139,3 @@ export async function speak(text: string): Promise<string | null> {
     return null
   }
 }
-
-/** Voice ids this build of the model actually carries. */
-export async function availableVoices(): Promise<string[]> {
-  const tts = (await load()) as unknown as { voices?: Record<string, unknown> } | null
-  return tts?.voices ? Object.keys(tts.voices) : []
-}

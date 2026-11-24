@@ -28,7 +28,7 @@ import { holdCamera, releaseCamera } from './camera'
  */
 
 /**
- * Served from our own origin, copied out of node_modules by scripts/start.mjs.
+ * Served from our own origin, copied out of node_modules by electron/main.cjs.
  *
  * Not a CDN, for two reasons that both bite. The runtime arrives as a script
  * and the page's CSP names no CDN in `script-src` — so a CDN path is simply
@@ -949,5 +949,3 @@ export function peaceScroll(): number | null {
   }
   return hand.y - peaceFrom.y
 }
-
-export const handsRunning = () => running

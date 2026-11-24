@@ -31,12 +31,9 @@ import {
   watchUi,
   watchConnection,
   connectedLabels,
-  usingBridge,
-  type Msg,
 } from './lib/brain'
 import { startAnalyser, micLevel } from './lib/audio'
 import { probeCapabilities } from './lib/capabilities'
-import { env } from './config'
 
 /**
  * The conversation.
@@ -80,7 +77,6 @@ const LEADING_NAME = new RegExp(`${CALL_AT_START}[\\s,.:!?-]*`, 'i')
 export default function App() {
   const store = useStore
   const phase = useStore((s) => s.phase)
-  const history = useRef<Msg[]>([])
   const speaker = useRef<ReturnType<typeof createSpeaker> | null>(null)
   const voice = useRef<Voice | null>(null)
 
@@ -155,7 +151,7 @@ export default function App() {
     let filled = false
 
     try {
-      const { text } = await ask(said, history.current, {
+      await ask(said, {
         onText: (delta) => {
           if (stale()) return
           if (!started) {
@@ -191,16 +187,6 @@ export default function App() {
       })
 
       if (stale()) return
-
-      // The bridge keeps conversation state in its own session, so history is
-      // only threaded through on the direct path.
-      if (!usingBridge) {
-        history.current.push({ role: 'user', content: said })
-        history.current.push({ role: 'assistant', content: text || '…' })
-        if (history.current.length > 16) {
-          history.current = history.current.slice(-16)
-        }
-      }
 
       await spk.end()
       if (stale()) return
@@ -471,12 +457,6 @@ export default function App() {
       }
     })
     const warming = warm().catch((err: Error) => s.setError(err.message))
-
-    if (!usingBridge && !env.anthropicKey) {
-      s.setError(
-        'No Anthropic API key — copy .env.example to .env.local and set VITE_ANTHROPIC_API_KEY.',
-      )
-    }
 
     // Pull the neural voice down during the boot sequence so the first
     // "Hey Jarvis" isn't waiting on an 86MB download. Deliberately not awaited

@@ -1,113 +1,57 @@
-# J.A.R.V.I.S.
+# S.A.J.I.
 
-A browser voice assistant with an Iron Man holographic interface. Say
-**"Hey Jarvis"**, he wakes, listens, and does real things through your tools —
-searches the web, generates images, drives your phone, reads your mail. The face
-is a web page (React + Vite + Three.js + custom GLSL). The brain is Claude Code,
-run headless as a library.
+An always-on Windows voice assistant with a holographic interface. It sits
+hidden in the tray; say **"Hey Saji"** and it appears, listens, and does real
+things through your tools — searches the web, reads pages in your Chrome,
+controls your PC. The face is a web page (React + Vite + Three.js + custom
+GLSL) in its own Electron window. The brain is Claude Code, run headless as a
+library.
 
-**The only subscription you need is Claude Code.** No API keys, no OpenAI
-account, no cloud bill — the brain runs on your existing Claude Code login, and
-the heavy work (the model itself) runs on Anthropic's servers, so even a low-end
-laptop only has to draw the interface. **ElevenLabs is an optional add-on** that
-gives JARVIS a much better voice and sharper hearing; without it he speaks and
-listens through the browser's own speech, and everything still works.
+**The only subscription you need is Claude Code.** No API keys — the brain
+runs on your existing Claude Code login. A Deepgram key (in `.env.local`) gives
+it sharp hearing; ElevenLabs is an optional better voice.
 
 ---
 
 ## Requirements
 
-**In one line:** a Claude Code subscription, plus two free things every computer
-can have — Node.js and Chrome. That's the whole list.
-
-- **Claude Code, installed and logged in** — this is the only account you need.
-  Install it with the official method — `npm install -g @anthropic-ai/claude-code`,
-  or the platform installer at <https://docs.claude.com/en/docs/claude-code> —
+- **Windows**, with a microphone.
+- **Claude Code, installed and logged in** — `npm install -g @anthropic-ai/claude-code`,
   then run `claude` once and complete login. The bridge reuses that login. **No
   API key**, and usage is billed to your existing Claude account.
-- **Node.js 20 or newer** — free, one installer from <https://nodejs.org>. This
-  is a Node web app, so it is the one unavoidable tool.
-- **Google Chrome or Microsoft Edge**, in a **real browser window** — not an
-  embedded preview pane. Preview panes (including the one inside editors and
-  Claude Code) block microphone access, so the page loads and looks right but
-  never hears you. JARVIS also needs WebGL, which these browsers provide.
-- **Optional: an ElevenLabs API key** — a good add-on, not a requirement. It
-  gives a better voice and sharper transcription; the free tier is plenty for a
-  demo. Without it, everything runs on the browser's own speech.
-
-Run `npm run setup` after cloning and it checks all of this for you, in plain
-language.
+- **Node.js 20 or newer** — <https://nodejs.org>.
+- **Recommended: a Deepgram API key** in `.env.local` (`DEEPGRAM_API_KEY=`) for
+  transcription. See `.env.example`.
+- **Optional: an ElevenLabs API key** for a better voice.
 
 ---
 
 ## Quick start
 
-First, install, then start it:
-
 ```bash
 npm install
-npm start          # runs the brain and the face together
-```
-
-Then open the URL it prints (http://localhost:5173) in **Chrome**, click **INITIALISE**, and say **“Hey Jarvis”**.
-
-Prefer two terminals? Run them separately instead:
-
-```bash
-npm install
-```
-
-Terminal 1 — the brain:
-
-```bash
-npm run bridge
-```
-
-Terminal 2 — the face:
-
-```bash
-npm run dev
-```
-
-Then open the app in a **real Chrome or Edge window**:
-
-```bash
-open http://localhost:5173
-```
-
-Click **INITIALISE**, allow the microphone when asked, and say **"Hey Jarvis"**.
-
-> It has to be a real browser window. Embedded preview panes block the
-> microphone, so JARVIS will look perfectly alive and simply never respond.
-
-### As a desktop app (Windows)
-
-```bash
-npm run desktop              # start Saji (hidden in the tray until you say "Hey Saji")
-npm run desktop:writes       # same, with PC actions allowed
 npm run desktop:shortcut     # put a SAJI icon on the desktop and Start menu
+npm start                    # start Saji (hidden in the tray until you say "Hey Saji")
+npm run start:writes         # same, also allowing shell and file writes
 ```
 
-In the app the assistant is called **Saji**. It is always on and out of sight:
-it starts hidden in the tray (and, from the first run, with Windows), the
-window comes up on top when you say "Hey Saji" without taking the keyboard
-from what you were doing, and it hides again about five seconds after the
-conversation goes quiet, unless you have clicked into it. It has no title bar
-or taskbar button and covers the screen above the taskbar; **Escape** puts it
-away (and Saji to sleep). Only the animation
-shows: the title wordmark is off (`brand` in `src/store.ts`). Pass `--show` to
-open the window straight away.
+Then press **Ctrl+Space**, press **L**, record your voice lock and your
+"Hey Saji" takes once, and from then on just say **"Hey Saji"**.
+
+Saji is always on and out of sight: it starts hidden in the tray (and, from
+the first run, with Windows), the window comes up on top when you say
+"Hey Saji" without taking the keyboard from what you were doing, and it hides
+again about five seconds after the conversation goes quiet, unless you have
+clicked into it. It has no title bar or taskbar button and covers the screen
+above the taskbar; **Escape** puts it away (and Saji to sleep). Only the
+animation shows: the title wordmark is off (`brand` in `src/store.ts`). Pass
+`--show` to open the window straight away.
 
 The app (`electron/main.cjs`) starts the bridge and the face itself, presses
-INITIALISE for you, and keeps listening when the window is closed: it lives
-in the system tray. **Ctrl+Space** shows or hides it from anywhere (falls
-back to Ctrl+Alt+J if something else owns Ctrl+Space). Right-click the tray
-icon for **Start with Windows**, the log and **Quit**. Output goes to
-`logs/desktop.log`.
-
-The app is its own browser, on port 5190, so its voice lock and "Hey Saji"
-recordings are separate from Chrome's — record them once inside the app.
-Don't run `npm start` at the same time; both need port 8787.
+INITIALISE for you, and keeps listening when the window is closed. **Ctrl+Space**
+shows or hides it from anywhere (falls back to Ctrl+Alt+J if something else owns
+Ctrl+Space). Right-click the tray icon for **Start with Windows**, the log and
+**Quit**. Output goes to `logs/desktop.log`.
 
 ---
 
@@ -311,12 +255,10 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 
 | Variable | Effect |
 |---|---|
-| `VITE_BACKEND` | `bridge` (default) or `direct` |
 | `VITE_BRIDGE_URL` | Where to reach the bridge |
 | `VITE_TTS_ENGINE` | `system` or `kokoro` |
 | `VITE_KOKORO_VOICE` | Voice for the Kokoro engine |
 | `VITE_USE_ELEVENLABS` | Force the ElevenLabs voice on |
-| `VITE_ANTHROPIC_API_KEY` | Direct mode only |
 
 ### Adding an ElevenLabs key
 
@@ -347,19 +289,18 @@ the temp directory and any folders in `JARVIS_FILE_ROOTS`. Paths that hold
 credentials, such as `~/.ssh`, `~/.claude` and `.env` files, stay refused even
 inside those folders.
 
-To allow effectful tools (phone, browser driving, sending), run the bridge this
+To allow effectful tools (browser driving, sending, a shell), start Saji this
 way instead:
 
 ```bash
-npm run bridge:writes
+npm run start:writes
 ```
 
-The script passes `--writes` to the bridge, so it works in Windows `cmd` and
-PowerShell too. With `npm start`, use `npm start -- --writes`. Writes add `Bash`,
+Writes add `Bash`,
 `Write`, `Edit` and `NotebookEdit` to the agent's tools. The file tools stay
 inside the same folders; the shell can reach anything your user account can.
 
-> Read `decideTool()` before you do. *"Hey Jarvis, clean up my downloads folder"*
+> Read `decideTool()` before you do. *"Hey Saji, clean up my downloads folder"*
 > means something rather different with writes enabled.
 
 ### PC controls (Windows)
@@ -374,7 +315,7 @@ file, and what you say is passed in as data, never pasted into the script.
 | "volume 40", "turn it up", "mute" | `pc_volume` |
 | "pause", "next song" | `pc_media` |
 | "brightness 70" | `pc_brightness` |
-| "take a screenshot" (saved to Pictures\JARVIS), "lock my PC" | `pc_screenshot`, `pc_lock` |
+| "take a screenshot" (saved to Pictures\SAJI), "lock my PC" | `pc_screenshot`, `pc_lock` |
 | "what's my battery", "how much space is left" | `pc_status` |
 | "find my CV", "open downloads", "make a folder called Projects on the desktop" | `pc_find_files` (Windows Search index), `pc_open_path`, `pc_make_folder` |
 | "move that file to the Recycle Bin" | `pc_recycle`, which **asks first** |
@@ -394,11 +335,11 @@ script by path. Turn the whole set off with `JARVIS_DISABLE=pc`.
 — it states plainly whether he is hearing you and whether he is producing sound.
 Press **T** for a one-line audio self-test.
 
-**No voice at all.** You must be in **Chrome or Edge**, in a **real browser
-window** (not an embedded preview), and you must have **allowed the microphone**.
+**No voice at all.** Check Windows has given microphone access to desktop apps
+(Settings → Privacy → Microphone) and look in `logs/desktop.log`.
 
-**Bridge not reachable.** Check that `npm run bridge` is still running in its
-terminal, and that nothing else is holding port `8787`. If the port is taken,
+**Bridge not reachable.** Quit Saji from the tray and start it again, and check
+that nothing else is holding port `8787`. If the port is taken,
 the bridge says so in one line at startup and exits. It listens on `127.0.0.1`
 only. Reaching it from another machine takes `JARVIS_BRIDGE_HOST` and
 `JARVIS_ALLOWED_HOSTS`, and your own authentication in front of it first.

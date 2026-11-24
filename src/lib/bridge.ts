@@ -1,6 +1,12 @@
-import type { AskHandlers } from './anthropic'
 import type { Blade, Panel } from '../store'
 import { BRIDGE_WS_URL } from '../config'
+
+export type AskHandlers = {
+  /** Fires for each chunk of the spoken answer. */
+  onText: (delta: string) => void
+  /** Fires when Claude starts running a tool. */
+  onTool: (name: string) => void
+}
 
 /**
  * Client for the local bridge (see bridge/server.mjs).
@@ -238,7 +244,7 @@ function connect(): Promise<WebSocket> {
 
     const timer = setTimeout(() => {
       ws.close()
-      settle(new Error('Bridge not responding — is `npm run bridge` running?'))
+      settle(new Error('Bridge not responding — restart Saji from the tray.'))
     }, 6000)
 
     ws.onopen = () => {
