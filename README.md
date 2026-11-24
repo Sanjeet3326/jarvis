@@ -92,7 +92,9 @@ In the app the assistant is called **Saji**. It is always on and out of sight:
 it starts hidden in the tray (and, from the first run, with Windows), the
 window comes up on top when you say "Hey Saji" without taking the keyboard
 from what you were doing, and it hides again about five seconds after the
-conversation goes quiet, unless you have clicked into it. Only the animation
+conversation goes quiet, unless you have clicked into it. It has no title bar
+or taskbar button and covers the screen above the taskbar; **Escape** puts it
+away (and Saji to sleep). Only the animation
 shows: the title wordmark is off (`brand` in `src/store.ts`). Pass `--show` to
 open the window straight away.
 

@@ -8,7 +8,7 @@
  */
 import { useStore, type Phase } from '../store'
 
-type Desktop = { show: () => void; hide: () => void }
+type Desktop = { show: () => void; hide: () => void; dismiss: () => void }
 const desktop = (window as unknown as { sajiDesktop?: Desktop }).sajiDesktop
 
 /** Phases that mean a conversation is happening. */
@@ -17,6 +17,12 @@ const ACTIVE: Phase[] = ['waking', 'listening', 'thinking', 'tooling', 'speaking
 const HIDE_AFTER_MS = 5000
 
 if (desktop) {
+  // There is no title bar or close button: Escape is how it is put away.
+  // (App.tsx's own Escape handler puts Saji to sleep at the same time.)
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') desktop.dismiss()
+  })
+
   let hideTimer: ReturnType<typeof setTimeout> | null = null
   /**
    * Until Saji has been dormant once, only a real question brings the window

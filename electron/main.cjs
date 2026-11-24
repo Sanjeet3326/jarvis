@@ -13,7 +13,7 @@
  * Everything the bridge and the face print goes to logs/desktop.log.
  */
 
-const { app, BrowserWindow, Tray, Menu, globalShortcut, session, dialog, nativeImage, shell, ipcMain } = require('electron')
+const { app, BrowserWindow, Tray, Menu, globalShortcut, session, dialog, nativeImage, shell, ipcMain, screen } = require('electron')
 const { spawn, execFileSync } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -128,10 +128,21 @@ let hintedTray = false
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1400,
-    height: 900,
-    minWidth: 900,
-    minHeight: 600,
+    // Part of the desktop, not an app window: no title bar, no buttons, no
+    // taskbar button, and the whole screen above the taskbar. It comes and
+    // goes on its own; Escape, Ctrl+Space and the tray put it away by hand.
+    ...screen.getPrimaryDisplay().workArea,
+    frame: false,
+    // No invisible resize border: without this the window spills ~10px past
+    // the screen edges.
+    thickFrame: false,
+    skipTaskbar: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    roundedCorners: false,
     show: false,
     title: 'S.A.J.I.',
     icon: path.join(__dirname, 'icon.png'),
@@ -178,6 +189,12 @@ function createWindow() {
   })
 
   win.webContents.on('did-finish-load', () => void autoInitialise())
+
+  // Follow the screen if its size or the taskbar changes.
+  const fit = () => win && !win.isDestroyed() && win.setBounds(screen.getPrimaryDisplay().workArea)
+  screen.on('display-metrics-changed', fit)
+  screen.on('display-added', fit)
+  screen.on('display-removed', fit)
   win.webContents.on('console-message', (e) => {
     const m = e.message ?? ''
     if (e.level === 'error' || e.level === 3 || /\[jarvis\]/.test(m)) log('page', m)
@@ -238,6 +255,12 @@ ipcMain.on('saji:show', (e) => {
 })
 ipcMain.on('saji:hide', (e) => {
   if (e.sender === win?.webContents) unpop()
+})
+// Escape: put it away now, focused or not.
+ipcMain.on('saji:dismiss', (e) => {
+  if (e.sender !== win?.webContents) return
+  win.setAlwaysOnTop(false)
+  win.hide()
 })
 
 function toggle() {
