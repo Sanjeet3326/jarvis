@@ -3,6 +3,8 @@ import { getMic } from './audio'
 import { speakingNow, speakingSince } from './tts'
 import { startVad, type Vad } from './vad'
 import { caps } from './capabilities'
+import * as speaker from './speaker'
+import * as wakeword from './wakeword'
 
 /**
  * The voice loop.
@@ -76,9 +78,34 @@ const WAKE_DEBOUNCE = 1500
  * Jervis, Jarvys or Java's for a perfectly clear utterance — every one of which
  * used to be silently discarded, so the wake word "just didn't work" with no
  * indication why. Better a rare false wake than a name that does not answer.
+ *
+ * Deepgram adds its own, and keeps inventing more: with an Indian accent
+ * "Hey Jarvis" came back as "Service", "Hey, service", "Day service", "His
+ * service" and "Disarmice", even with the name given to it as a keyterm.
+ * Listing them one by one cannot keep up, but they share a shape — a word
+ * ending in -arvis, -ervice, -armice — so that is matched instead, and only
+ * as the first word, or second after a greeting-like one, so "the customer
+ * service was bad" mid-sentence never wakes him. With the voice lock on,
+ * only you can say any of it.
  */
-const WAKE =
-  /\b(?:hey|hi|ok|okay|yo)?\s*(?:jarvis|jarvys|jervis|jarvis's|travis|jarviss|java's|jarv)\b(?!'s)/i
+const GREETING = String.raw`(?:hey|hi|hai|ok|okay|yo|day|they|his|he|hay|ay|a)`
+/**
+ * The wake name is now "Saji". Deepgram has never heard it either, so the
+ * same trick applies: match the sound shape — s, a vowel, a j/g/z/ch sound, an
+ * ee — and the spellings it actually produces (Sushi, Sergey, Sadie, Sanji…),
+ * only at the start. wakeword.ts recognises the sound itself and catches the
+ * rest; this is the half that needs no recordings.
+ */
+const NAMEISH = String.raw`(?:sa+h?(?:j+|g+|z+|dg|ch)h?(?:i+|ee|ie|y|e)|sa[\s-]?(?:ji|jee|gee|g)|sanji|sajid|sushi|sergei|sergey|sergi|sadie|saggy|sachi|sage)`
+
+/** His name at the very start of an utterance, with any greeting before it.
+ *  Shared with App.tsx, which strips it off a command the same way. */
+export const CALL_AT_START = String.raw`^\W*(?:${GREETING}[\s,.]+)?${NAMEISH}\b(?!'s)`
+
+const WAKE = new RegExp(
+  `${CALL_AT_START}|\\b(?:hey|hi|ok|okay|yo)?[\\s,]*(?:saji|sajji|saaji|saajee|sajee)\\b(?!'s)`,
+  'i',
+)
 
 /** Everything after the wake phrase, which is usually the actual command. */
 function afterWake(text: string): string {
@@ -89,6 +116,27 @@ function afterWake(text: string): string {
     .replace(/^[\s,.:;!?-]+/, '')
     .trim()
 }
+
+type Word = { w: string; s: number; e: number }
+
+/**
+ * The command after a wake name the transcriber mis-spelt: whatever was said
+ * after the moment the wake-word detector heard the name. `heardS` is that
+ * moment, in seconds from the start of the recording.
+ */
+function afterHeard(words: Word[] | undefined, heardS: number): string {
+  if (!words?.length) return ''
+  return words
+    .filter((w) => w.s >= heardS - 0.25)
+    .map((w) => w.w)
+    .join(' ')
+    .replace(/^[\s,.:;!?-]+/, '')
+    .trim()
+}
+
+/** The detector reports when it finished thinking, not when the audio was:
+ *  the 2048-sample tap and one model step sit in between. */
+const DETECTOR_LAG_MS = 180
 
 // ---------------------------------------------------------------------------
 // Assembling one utterance out of several segments
@@ -141,6 +189,17 @@ const TRAILS = /[,;:–—-]$/
  * is also least likely: the user has not yet heard enough to want to stop him.
  */
 const SELF_GUARD_MS = 350
+
+/**
+ * With the voice lock on, a barge-in waits this long so there is enough of the
+ * new voice to recognise. Without it anyone talking in the room would cut him
+ * off mid-answer, even though what they said would then be ignored.
+ */
+const BARGE_CHECK_MS = 900
+
+/** How the voice lock's verdict reads in the diagnostics panel. */
+const verdict = (v: speaker.Verdict) =>
+  v.score === null ? v.why : `${v.why} (${v.score.toFixed(2)})`
 
 /**
  * A quiet gap this long with a finished-looking sentence ends the turn.
@@ -267,7 +326,7 @@ const norm = (s: string) =>
  * would be the single most infuriating failure this file could have.
  */
 const OVERRIDE =
-  /\b(stop|wait|jarvis|cancel|enough|quiet|hold on|shut up|never ?mind|forget it|no)\b/i
+  /\b(stop|wait|saji|jarvis|cancel|enough|quiet|hold on|shut up|never ?mind|forget it|no)\b/i
 
 /**
  * Words too common to be evidence of anything.
@@ -361,6 +420,9 @@ export const diag = {
   restarts: 0,
   /** Milliseconds the last transcription round-trip took. */
   idleMs: 0,
+  /** The last 40 transcripts with the voice lock's verdict on each — what was
+   *  said beside who it was judged to be, which neither log shows alone. */
+  log: [] as { text: string; mode: VoiceMode; ok: boolean; score: number | null; at: number }[],
 }
 
 /** Record why a transcript went nowhere. Silence always has a reason; this is
@@ -398,7 +460,9 @@ export async function startVoice(h: VoiceHandlers): Promise<Voice> {
     )
     return { stop: () => {}, live: () => false }
   }
-  diag.engine = caps().stt ? 'elevenlabs' : 'browser'
+  // 'cloud' is whichever transcriber the bridge holds a key for — ElevenLabs
+  // or Deepgram; the page never needs to know which.
+  diag.engine = caps().stt ? 'cloud' : 'browser'
   return caps().stt ? startElevenVoice(h) : startBrowserVoice(h)
 }
 
@@ -420,7 +484,7 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
    * Order is preserved because the drain is single-flight, which matters —
    * "London" arriving before "what's the weather in" is worse than either.
    */
-  const pendingAudio: Blob[] = []
+  const pendingAudio: { blob: Blob; from: number; to: number }[] = []
   let draining = false
 
   /**
@@ -445,10 +509,13 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
    * transcript arriving — and the transcript belongs to the mode the user is in
    * now, not the one they interrupted.
    */
-  const transcribe = async (blob: Blob) => {
+  const transcribe = async ({ blob, from, to }: { blob: Blob; from: number; to: number }) => {
     const mode = h.mode()
     if (mode === 'deaf') return
     const t0 = performance.now()
+    // Who is speaking is checked alongside what they said, not after it, so
+    // the voice lock costs no extra wait on top of the transcription.
+    const who = speaker.verifyAudio(blob)
     try {
       const res = await fetch(`${BRIDGE_HTTP_URL}/stt`, {
         method: 'POST',
@@ -462,7 +529,7 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
         drop(`transcription failed (${res.status})`)
         return
       }
-      const { text } = (await res.json()) as { text?: string }
+      const { text, words } = (await res.json()) as { text?: string; words?: Word[] }
       const said = (text ?? '').trim()
       diag.lastError = ''
 
@@ -481,13 +548,27 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
       diag.heard = said
       diag.heardAt = Date.now()
 
+      const v = await who
+      diag.log.push({ text: said, mode, ok: v.ok, score: v.score, at: Date.now() })
+      if (diag.log.length > 40) diag.log.shift()
+      if (!v.ok) {
+        drop(`ignored "${said.slice(-30)}" — ${verdict(v)}`)
+        return
+      }
+
       if (mode === 'wake') {
-        if (WAKE.test(said) && Date.now() - lastWake > WAKE_DEBOUNCE) {
+        const byName = WAKE.test(said)
+        // The detector heard "Hey Saji" in this stretch of audio, whatever the
+        // transcriber made of it.
+        const heard = byName ? null : wakeword.firedBetween(from - 300, to + 400)
+        if ((byName || heard !== null) && Date.now() - lastWake > WAKE_DEBOUNCE) {
           lastWake = Date.now()
           diag.wakes++
           diag.dropped = ''
           diag.accepted++
-          h.onWake(afterWake(said))
+          h.onWake(
+            byName ? afterWake(said) : afterHeard(words, (heard! - DETECTOR_LAG_MS - from) / 1000),
+          )
         } else {
           drop(`heard "${said.slice(-40)}" — not his name`)
         }
@@ -535,11 +616,19 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
           diag.selfGuarded++
           return
         }
+        if (speaker.locked()) {
+          void speaker.verifySoon(BARGE_CHECK_MS).then((v) => {
+            if (v.ok) h.onSpeechStart()
+            else drop(`kept talking over another voice — ${verdict(v)}`)
+          })
+          return
+        }
         h.onSpeechStart()
       }
     },
-    onEnd: (blob) => {
-      pendingAudio.push(blob)
+    onEnd: (blob, ms) => {
+      const to = performance.now()
+      pendingAudio.push({ blob, from: to - ms, to })
       void drain()
     },
     onLevel: (v) => {
@@ -617,6 +706,12 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
   let lastWake = 0
   let lastAlive = Date.now()
   let silenceTimer: ReturnType<typeof setTimeout> | null = null
+  /** When the words being assembled started arriving — how far back in the
+   *  microphone the voice lock has to look to hear who said them. */
+  let since = 0
+  /** That span, padded for the recogniser's lag, in milliseconds. */
+  const spoken = (pad: number, min: number) =>
+    Math.min(8000, Math.max(min, (since ? Date.now() - since : 0) + pad))
 
   /** Same assembly rules as the premium path — a pause is not a full stop. */
   const assemble = makeAssembler({
@@ -644,11 +739,16 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
     interim = ''
     started = false
     barged = false
+    since = 0
   }
 
-  const emit = () => {
+  const emit = async () => {
     const text = `${settled} ${interim}`.replace(/\s+/g, ' ').trim()
     const mode = h.mode()
+    // Measured before reset() forgets when the words began. The recogniser
+    // endpoints 900ms after the last word, so that much trailing quiet is in
+    // the window too; the voice lock trims silence before judging.
+    const span = spoken(1200, 1500)
     reset()
     if (!text || mode === 'deaf') return
     if (isEcho(text, speakingNow())) {
@@ -657,6 +757,11 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
     }
     diag.heard = text
     diag.heardAt = Date.now()
+    const v = await speaker.verifyRecent(span)
+    if (!v.ok) {
+      drop(`ignored "${text.slice(-30)}" — ${verdict(v)}`)
+      return
+    }
     if (mode === 'wake') {
       assemble.cancel()
       if (WAKE.test(text) && Date.now() - lastWake > WAKE_DEBOUNCE) {
@@ -680,7 +785,7 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
     clearSilence()
     // Endpoint on a short quiet gap; the ElevenLabs path tunes this more
     // finely, but a fixed window is plenty for the fallback.
-    silenceTimer = setTimeout(emit, 900)
+    silenceTimer = setTimeout(() => void emit(), 900)
   }
 
   const onResult = (e: any) => {
@@ -704,21 +809,31 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
       interim = ''
       return
     }
-
     if (mode === 'wake') {
       settled += fresh
       if (WAKE.test(heard) && Date.now() - lastWake > WAKE_DEBOUNCE) {
         lastWake = Date.now()
-        diag.wakes++
         const trailing = afterWake(heard)
         reset()
-        h.onWake(trailing)
+        // A fixed span, not `spoken`: while dormant the recogniser accumulates
+        // everything said in the room, and only the name just heard is wanted.
+        void speaker.verifyRecent(2500).then((v) => {
+          if (!v.ok) {
+            drop(`ignored his name — ${verdict(v)}`)
+            return
+          }
+          diag.wakes++
+          h.onWake(trailing)
+        })
       } else if (settled.length > 400) {
         settled = ''
       }
       return
     }
 
+    // Roughly when this speech began: the recogniser's first result lags the
+    // first syllable by a few hundred milliseconds, which `spoken` pads for.
+    if (!since) since = Date.now()
     settled += fresh
     const full = `${settled} ${interim}`.replace(/\s+/g, ' ').trim()
     if (!started || (mode === 'guard' && !barged)) {
@@ -745,7 +860,14 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
       }
       started = true
       if (mode === 'guard') barged = true
-      h.onSpeechStart()
+      if (mode === 'guard' && speaker.locked()) {
+        void speaker.verifyRecent(spoken(600, 1200)).then((v) => {
+          if (v.ok) h.onSpeechStart()
+          else drop(`kept talking over another voice — ${verdict(v)}`)
+        })
+      } else {
+        h.onSpeechStart()
+      }
     }
     diag.dropped = ''
     // Show the whole thought, not just the fragment being spoken now — there
@@ -813,9 +935,26 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
     spin()
   }, 5000)
 
+  // The recogniser keeps its words until it decides you have finished, so
+  // the wake-word detector — which hears the sound itself — wakes him first.
+  const offWake = wakeword.onWake(() => {
+    if (h.mode() !== 'wake' || Date.now() - lastWake <= WAKE_DEBOUNCE) return
+    lastWake = Date.now()
+    reset()
+    void speaker.verifyRecent(2500).then((v) => {
+      if (!v.ok) {
+        drop(`ignored "Hey Saji" — ${verdict(v)}`)
+        return
+      }
+      diag.wakes++
+      h.onWake('')
+    })
+  })
+
   return {
     stop: () => {
       stopped = true
+      offWake()
       clearInterval(health)
       clearSilence()
       assemble.cancel()

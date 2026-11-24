@@ -160,6 +160,11 @@ function set(cue: Cue, to: number, ms: number) {
   fadeTo(cue, level(cue), ms)
 }
 
+/** Where the spoken introduction starts in boot-music.mp3, and how long the
+ *  fade before it takes. */
+const BOOT_VOICE_AT_MS = 4600
+const BOOT_EARLY_FADE_MS = 1200
+
 /** The boot cue's own dissolve, held so stopAll can cancel it. */
 let dissolve: ReturnType<typeof setTimeout> | null = null
 
@@ -186,10 +191,15 @@ export function playBoot() {
     // Start the fade far enough from the end that it is a dissolve rather than
     // a cut, and never sooner than half a second in.
     const at = Math.max(500, (secs - 2.6) * 1000)
+    // The shipped clip has a voice in it from 4.6s ("Allow me to introduce
+    // myself. I am Jarvis…"). He now greets you himself, so keep only the
+    // music before it: be silent by 4.5s.
+    const early = BOOT_VOICE_AT_MS - BOOT_EARLY_FADE_MS
+    const fadeAt = Math.min(at, early)
     dissolve = setTimeout(() => {
       dissolve = null
-      set('boot-music', 0, 2500)
-    }, at)
+      set('boot-music', 0, fadeAt === early ? BOOT_EARLY_FADE_MS - 100 : 2500)
+    }, fadeAt)
   }
   if (t.el.readyState >= 1) arm()
   else t.el.addEventListener('loadedmetadata', arm, { once: true })

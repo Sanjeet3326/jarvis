@@ -4,8 +4,11 @@ import { Hud } from './ui/Hud'
 import { Boot } from './ui/Boot'
 import { Ignition } from './ui/Ignition'
 import { Diagnostics } from './ui/Diagnostics'
+import { VoiceLock } from './ui/VoiceLock'
+import * as voiceLock from './lib/speaker'
+import * as wakeword from './lib/wakeword'
 import { useStore } from './store'
-import { startVoice, type Voice, type VoiceMode } from './lib/voice'
+import { startVoice, CALL_AT_START, type Voice, type VoiceMode } from './lib/voice'
 import { createSpeaker, cycleVoice, currentVoiceName } from './lib/tts'
 import * as sfx from './lib/sfx'
 import * as music from './lib/music'
@@ -53,7 +56,10 @@ const AWAIT_SPEECH_MS = 14000
 /** After an answer, how long the mic stays open for a follow-up before he
  *  drops back to standby. Long enough that you don't have to say the name
  *  again to continue a thought. */
-const FOLLOW_UP_MS = 11000
+const FOLLOW_UP_MS = 20000
+
+/** What he says as soon as he has finished starting up. */
+const BOOT_GREETING = "Hey buddy, what's up?"
 
 /** crypto.randomUUID needs a secure context, which a LAN address over plain
  *  http is not. Not worth failing a whole turn over an id. */
@@ -61,13 +67,13 @@ const newId = () =>
   globalThis.crypto?.randomUUID?.() ??
   `id${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
 
-/** The same mishearings voice.ts accepts for the wake word — otherwise a turn
- *  that woke him as "travis" gets that word sent on to the model as a question. */
-const NAME = '(?:jarvis|jarvys|jervis|travis|jarviss|java\'s|jarv)'
+// The same name-at-the-start voice.ts wakes on (CALL_AT_START) — otherwise a
+// turn that woke him as "Day service" gets those words sent on as a question.
+
 /** A bare vocative — "Jarvis", "hey jarvis" — with nothing asked. */
-const BARE_NAME = new RegExp(`^(?:hey|hi|ok|okay|yo)?\\s*${NAME}[\\s,.!?]*$`, 'i')
+const BARE_NAME = new RegExp(`${CALL_AT_START}[\\s,.!?]*$`, 'i')
 /** A leading vocative on a real command: "Jarvis, what's the weather". */
-const LEADING_NAME = new RegExp(`^(?:hey|hi|ok|okay|yo)?\\s*${NAME}\\b[\\s,.:!?-]*`, 'i')
+const LEADING_NAME = new RegExp(`${CALL_AT_START}[\\s,.:!?-]*`, 'i')
 
 export default function App() {
   const store = useStore
@@ -222,6 +228,7 @@ export default function App() {
 
   /** What the voice loop should do with what it hears, derived from phase. */
   const mode = (): VoiceMode => {
+    if (voiceLock.isEnrolling()) return 'deaf'
     switch (store.getState().phase) {
       case 'offline':
       case 'boot':
@@ -516,6 +523,16 @@ export default function App() {
     await probeCapabilities()
     store.getState().setVoice(currentVoiceName())
 
+    // The voice lock's ear on the microphone, and its model if a voiceprint is
+    // saved. Not awaited: until the model is ready the lock refuses rather
+    // than waves people through, so a slow download costs a moment, not the
+    // promise that only you are answered.
+    void voiceLock.prepare().catch((err: Error) =>
+      store.getState().setError(`Voice lock could not open the microphone: ${err.message}`),
+    )
+    // "Hey Saji" recognised from the sound, if it has been recorded (L panel).
+    void wakeword.start()
+
     // One voice loop, started once, running until the page closes.
     voice.current = await startVoice({
       mode,
@@ -526,7 +543,15 @@ export default function App() {
       onError: onVoiceError,
     })
 
-    store.getState().setPhase('dormant')
+    // Say hello the moment he is up, then listen for the answer exactly as if
+    // he had been called by name — so "hey buddy, what's up?" can be answered
+    // straight away without saying "Hey Saji" first.
+    store.getState().setPhase('waking')
+    const hello = createSpeaker()
+    speaker.current = hello
+    hello.say(BOOT_GREETING)
+    void hello.end()
+    listen(AWAIT_SPEECH_MS)
   }
 
   // -- clap to start --------------------------------------------------------
@@ -703,6 +728,7 @@ export default function App() {
       <Hud />
       <Boot />
       <Diagnostics />
+      <VoiceLock />
       <Ignition onStart={() => void powerOn()} />
     </>
   )

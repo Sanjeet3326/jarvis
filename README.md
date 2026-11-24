@@ -80,6 +80,25 @@ Click **INITIALISE**, allow the microphone when asked, and say **"Hey Jarvis"**.
 > It has to be a real browser window. Embedded preview panes block the
 > microphone, so JARVIS will look perfectly alive and simply never respond.
 
+### As a desktop app (Windows)
+
+```bash
+npm run desktop              # open JARVIS in its own window
+npm run desktop:writes       # same, with PC actions allowed
+npm run desktop:shortcut     # put a JARVIS icon on the desktop and Start menu
+```
+
+The app (`electron/main.cjs`) starts the bridge and the face itself, presses
+INITIALISE for you, and keeps listening when the window is closed: it lives
+in the system tray. **Ctrl+Space** shows or hides it from anywhere (falls
+back to Ctrl+Alt+J if something else owns Ctrl+Space). Right-click the tray
+icon for **Start with Windows**, the log and **Quit**. Output goes to
+`logs/desktop.log`.
+
+The app is its own browser, on port 5190, so its voice lock and "Hey Saji"
+recordings are separate from Chrome's — record them once inside the app.
+Don't run `npm start` at the same time; both need port 8787.
+
 ---
 
 ## How it works
@@ -205,7 +224,35 @@ chose.
 | **V** | Cycle the browser voice |
 | **Escape** | Stand down |
 | **D** | Live diagnostics panel |
+| **L** | Voice lock — record your voice so only you are answered |
 | **T** | One-line audio self-test |
+
+---
+
+## Wake word: "Hey Saji"
+
+The wake phrase is **"Hey Saji"**. It works two ways at once:
+
+- **From the transcript.** Spellings the transcriber tends to produce for it (Saji, Sajji, Sushi, Sergey, Sadie and so on) wake him, but only at the start of what you said. Deepgram is also given "Saji" as a keyterm.
+- **From the sound.** Press **L** and record "Hey Saji" 5–8 times, plus one recording of anything else. This builds a personal detector in the browser from openWakeWord's feature models (`public/models/oww/`, Apache-2.0), using template matching with no training. After that he wakes on how *you* say it, whatever the transcriber writes. Live numbers are in `window.__wakeword`.
+
+## Voice lock
+
+By default JARVIS answers anyone who says his name. Press **L**, read five
+short lines aloud, and save a voiceprint — from then on he ignores every voice
+but yours: other people can't wake him, give him commands, or talk over his
+answers.
+
+It runs entirely in the browser (`src/lib/speaker.ts`): a speaker-verification
+model (WeSpeaker ResNet34, downloaded once from Hugging Face and cached) turns
+each utterance into a voiceprint and compares it with yours. No account, no
+key, and no audio leaves the machine for it. **Test a voice** in the same panel
+shows the score, and the strictness slider moves the cut-off. Press **D** to
+see what was ignored and why.
+
+It is not a security boundary — a recording of your voice gets through. It
+stops JARVIS answering other people; the write gate below is still what
+protects anything that matters.
 
 ---
 
@@ -247,6 +294,8 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 | `JARVIS_DEBUG` | off | `1` logs every agent message to the bridge terminal, answer text and tool calls included |
 | `JARVIS_VOICE_ID` | none | ElevenLabs voice id |
 | `ELEVENLABS_API_KEY` | none | Optional; enables the ElevenLabs voice + Scribe |
+| `DEEPGRAM_API_KEY` | none | Optional; listening via Deepgram when there is no ElevenLabs key (voice stays the browser's). Can live in `.env.local` |
+| `DEEPGRAM_LANGUAGE` | `en` | `multi` to follow a mix of English and Hindi |
 
 ### Frontend (`.env.local`)
 
@@ -302,6 +351,30 @@ inside the same folders; the shell can reach anything your user account can.
 
 > Read `decideTool()` before you do. *"Hey Jarvis, clean up my downloads folder"*
 > means something rather different with writes enabled.
+
+### PC controls (Windows)
+
+Separate from writes, and on by default on Windows: a fixed set of actions in
+`bridge/pc.mjs`. It is not a shell. Each action is PowerShell written in the
+file, and what you say is passed in as data, never pasted into the script.
+
+| Say | Tool |
+|---|---|
+| "open Spotify / VS Code / wifi settings", "close Notepad" | `pc_open_app`, `pc_close_app` (closes politely, so apps can still ask to save) |
+| "volume 40", "turn it up", "mute" | `pc_volume` |
+| "pause", "next song" | `pc_media` |
+| "brightness 70" | `pc_brightness` |
+| "take a screenshot" (saved to Pictures\JARVIS), "lock my PC" | `pc_screenshot`, `pc_lock` |
+| "what's my battery", "how much space is left" | `pc_status` |
+| "find my CV", "open downloads", "make a folder called Projects on the desktop" | `pc_find_files` (Windows Search index), `pc_open_path`, `pc_make_folder` |
+| "move that file to the Recycle Bin" | `pc_recycle`, which **asks first** |
+| "shut down in 30 minutes", "restart", "sleep", "sign out", "cancel the shutdown" | `pc_power`, which **asks first** (except cancel) |
+
+**Asks first** is enforced by the bridge, not left to the model. The first call
+returns a one-time code. The action only runs when the code comes back after
+something new has been heard from you, and that something was a yes. Folders
+and files outside your user folder are refused, and so is opening a program or
+script by path. Turn the whole set off with `JARVIS_DISABLE=pc`.
 
 ---
 

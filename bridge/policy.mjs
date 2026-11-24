@@ -153,6 +153,11 @@ export function decideTool(name, allowWrites = false) {
     // indicator the user can see for as long as it is live.
     if (server === 'jarvis_eyes') return true
 
+    // This PC. A fixed list of actions written in pc.mjs, not a shell; the
+    // ones that lose work (power, Recycle Bin) gate themselves on the user's
+    // spoken yes, which a name-reading rule here could not express.
+    if (server === 'jarvis_pc') return true
+
     const tool = mcpToolOf(name)
     if (EFFECTFUL_VERB.test(tool) && !VETO_EXEMPT.has(`${server}__${tool}`)) {
       return allowWrites

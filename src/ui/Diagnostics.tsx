@@ -44,6 +44,16 @@ type TtsDiag = {
   lastText: string
 }
 
+type LockDiag = {
+  enrolled: boolean
+  model: string
+  error: string
+  checks: number
+  rejected: number
+  lastScore: number | null
+  lastWhy: string
+}
+
 const ago = (t: number) => (t ? `${((Date.now() - t) / 1000).toFixed(1)}s ago` : '—')
 
 function Row({ k, v, bad }: { k: string; v: string; bad?: boolean }) {
@@ -84,6 +94,7 @@ export function Diagnostics() {
   const w = window as unknown as Record<string, unknown>
   const v = (w.__voice ?? {}) as Partial<VoiceDiag>
   const t = (w.__tts ?? {}) as Partial<TtsDiag>
+  const l = (w.__voicelock ?? {}) as Partial<LockDiag>
 
   // The two verdicts worth stating outright, rather than making you infer them
   // from the numbers underneath.
@@ -118,6 +129,19 @@ export function Diagnostics() {
       <Row k="last heard" v={v.heard ? `"${v.heard}" ${ago(v.heardAt ?? 0)}` : '— nothing yet'} bad={!v.heard} />
       <Row k="last drop" v={v.dropped || '—'} bad={Boolean(v.dropped)} />
       <Row k="error" v={v.lastError || '—'} bad={Boolean(v.lastError)} />
+
+      <div className="diag-sec">VOICE LOCK · press L to set up</div>
+      <Row k="lock" v={l.enrolled ? 'on — only your voice' : 'off — anyone'} />
+      {l.enrolled && (
+        <>
+          <Row k="model" v={l.error ? `${l.model} — ${l.error}` : String(l.model ?? '—')} bad={l.model === 'failed'} />
+          <Row k="ignored" v={`${l.rejected ?? 0} of ${l.checks ?? 0}`} />
+          <Row
+            k="last check"
+            v={l.checks ? `${l.lastWhy}${l.lastScore != null ? ` (${l.lastScore.toFixed(2)})` : ''}` : '—'}
+          />
+        </>
+      )}
 
       <div className="diag-sec">SPEAKING · press T to test</div>
       <Row k="engine" v={String(t.engine ?? 'system')} />

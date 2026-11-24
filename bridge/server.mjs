@@ -15,12 +15,14 @@
  *   node bridge/server.mjs
  */
 
+import https from 'node:https'
 import { WebSocketServer } from 'ws'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { displayServer } from './panels.mjs'
 import { uiServer } from './ui.mjs'
 import { chromeAvailable, chromeServer } from './chrome.mjs'
 import { visionServer } from './vision.mjs'
+import { pcServer, PROMPT_PC } from './pc.mjs'
 import { homedir, tmpdir } from 'node:os'
 import { mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
@@ -35,7 +37,16 @@ import {
   fileRoots,
 } from './policy.mjs'
 
-const PORT = Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
+// Keys kept in .env.local (git-ignored) reach the bridge as well as the page,
+// so a Deepgram or ElevenLabs key is set once rather than in every shell that
+// starts JARVIS. Variables already in the environment win.
+try {
+  process.loadEnvFile(new URL('../.env.local', import.meta.url))
+} catch {
+  /* no .env.local — everything has a default */
+}
+
+const PORT =Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
 
 /**
  * Which interface to listen on. Loopback, unless you say otherwise.
@@ -160,7 +171,8 @@ const ALLOW_WRITES =
 
 /**
  * Built-in capabilities to leave out entirely: `browser` (the user's own
- * Chrome), `camera`, `interface` (the ui_* tools). A capability left out is
+ * Chrome), `camera`, `interface` (the ui_* tools), `pc` (the pc_* Windows
+ * controls in pc.mjs). A capability left out is
  * not merely denied — its tools never reach the model, which also saves their
  * schemas on every turn (about 3,100, 1,400 and 4,800 input tokens
  * respectively). The display itself is always on; it is how JARVIS shows
@@ -173,11 +185,16 @@ const DISABLED = new Set(
     .filter(Boolean),
 )
 
+/** The pc_* tools (bridge/pc.mjs): Windows only, on unless JARVIS_DISABLE=pc. */
+const PC_ON = process.platform === 'win32' && !DISABLED.has('pc')
+
 /**
- * The orchestrator model. Override with JARVIS_MODEL to trade quality for pace
- * — claude-sonnet-5 is noticeably snappier on camera if Opus feels slow.
+ * The orchestrator model. Sonnet by default: every word of a voice answer is
+ * waited for in silence, and Opus at high effort routinely took long enough
+ * that the pause read as the assistant having stopped listening. Set
+ * JARVIS_MODEL=claude-opus-5-5 for the deeper, slower answers.
  */
-const MODEL = process.env.JARVIS_MODEL ?? 'claude-opus-5'
+const MODEL = process.env.JARVIS_MODEL ?? 'claude-sonnet-5-5'
 
 /**
  * How hard the model thinks before answering.
@@ -194,7 +211,7 @@ const MODEL = process.env.JARVIS_MODEL ?? 'claude-opus-5'
  * matters more than pace; drop back to 'low' when filming and every second of
  * dead air shows.
  */
-const EFFORT = process.env.JARVIS_EFFORT ?? 'high'
+const EFFORT = process.env.JARVIS_EFFORT ?? 'medium'
 
 /**
  * Every MCP server Claude Code has configured, read out of its own config.
@@ -487,6 +504,7 @@ const SYSTEM_PROMPT = [
   DISABLED.has('interface') ? '' : PROMPT_INTERFACE,
   DISABLED.has('browser') ? '' : PROMPT_BROWSER,
   DISABLED.has('camera') ? '' : PROMPT_EYES,
+  PC_ON ? PROMPT_PC : '',
   PROMPT_TOOLS,
 ].join('')
 
@@ -507,6 +525,79 @@ function elevenKey() {
   } catch {
     return null
   }
+}
+
+/**
+ * Deepgram, as the transcriber when there is no ElevenLabs key.
+ *
+ * Listening is the half that matters for reliability — it is what replaces the
+ * browser recogniser that dies silently and hears JARVIS through the speakers —
+ * and it does not need ElevenLabs' paid voice to come with it. With only this
+ * key the app listens through the bridge and still speaks with the browser's
+ * own voice. Read from the environment or from .env.local (loaded below).
+ */
+function deepgramKey() {
+  return process.env.DEEPGRAM_API_KEY || null
+}
+
+/**
+ * One connection to Deepgram, kept open and warm.
+ *
+ * fetch() lets an idle connection go after about four seconds, and there is
+ * always a pause longer than that before you speak — so every transcription
+ * paid for a fresh TCP + TLS handshake: 1.6–1.8s from India against 0.5s on
+ * a warm line. A keep-alive agent holds the socket, and a tiny free request
+ * every 3s stops the far end closing it (it drops idle sockets within ~6s;
+ * measured: 1.5–2.9s per transcription without this, 0.2–0.7s with it). DEEPGRAM_HOST picks the region:
+ * api.eu.deepgram.com is ~100ms closer than the US default from India.
+ */
+const DEEPGRAM_HOST = process.env.DEEPGRAM_HOST || 'api.deepgram.com'
+const deepgramAgent = new https.Agent({ keepAlive: true, maxSockets: 4 })
+
+/** A kept-alive socket can be closed by the far end just as it is reused;
+ *  that fails instantly, before anything was processed, so retry once. */
+async function deepgramRequest(path, opts = {}) {
+  try {
+    return await deepgramOnce(path, opts)
+  } catch (err) {
+    if (!/socket hang up|ECONNRESET|EPIPE/i.test(String(err?.message ?? err))) throw err
+    return deepgramOnce(path, opts)
+  }
+}
+
+function deepgramOnce(path, { method = 'GET', headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      { host: DEEPGRAM_HOST, path, method, headers, agent: deepgramAgent },
+      (res) => {
+        const parts = []
+        res.on('data', (c) => parts.push(c))
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, text: Buffer.concat(parts).toString('utf8') }),
+        )
+        res.on('error', reject)
+      },
+    )
+    req.setTimeout(15000, () => req.destroy(new Error('deepgram timed out')))
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
+if (deepgramKey()) {
+  const warm = () =>
+    void deepgramRequest('/v1/projects', {
+      headers: { authorization: `Token ${deepgramKey()}` },
+    }).catch(() => {})
+  warm()
+  setInterval(warm, 3000).unref()
+}
+
+/** Which transcriber /stt will use, or null for the browser's own. */
+function sttEngine() {
+  if (elevenKey()) return 'elevenlabs'
+  if (deepgramKey()) return 'deepgram'
+  return null
 }
 
 const VOICE_ID = process.env.JARVIS_VOICE_ID ?? 'JBFqnCBsd6RMkjVDRZzb'
@@ -740,9 +831,10 @@ const handleRequest = async (req, res) => {
     // with a key the app transcribes with Scribe and speaks with ElevenLabs;
     // without one it falls back to the browser's own recogniser and voice, so a
     // student with nothing configured still has a working assistant.
+    // Deepgram covers listening only, so it lights `stt` and leaves `tts` alone.
     const eleven = Boolean(elevenKey())
     res.writeHead(200, { ...cors, 'content-type': 'application/json' })
-    return res.end(JSON.stringify({ ok: true, tts: eleven, stt: eleven }))
+    return res.end(JSON.stringify({ ok: true, tts: eleven, stt: sttEngine() !== null }))
   }
 
   // Serve local image files to the page. Screenshots and generated art land on
@@ -950,10 +1042,10 @@ const handleRequest = async (req, res) => {
   // speaking at all is done locally with voice-activity detection, which never
   // touches this endpoint; this is only for the words.
   if (req.method === 'POST' && req.url === '/stt') {
-    const key = elevenKey()
-    if (!key) {
+    const engine = sttEngine()
+    if (!engine) {
       res.writeHead(503, cors)
-      return res.end('no elevenlabs key')
+      return res.end('no elevenlabs or deepgram key')
     }
 
     const type = req.headers['content-type'] || 'audio/webm'
@@ -982,6 +1074,51 @@ const handleRequest = async (req, res) => {
       return res.end(JSON.stringify({ text: '' }))
     }
 
+    if (engine === 'deepgram') {
+      try {
+        // Deepgram takes the raw bytes and reads the codec from the
+        // content-type, so the MediaRecorder's own type is passed straight on.
+        // Nova-3 handles accented English well; DEEPGRAM_LANGUAGE=multi lets
+        // it follow a speaker switching between English and Hindi.
+        const params = new URLSearchParams({
+          model: process.env.DEEPGRAM_MODEL ?? 'nova-3',
+          language: process.env.DEEPGRAM_LANGUAGE ?? 'en',
+          smart_format: 'true',
+        })
+        // The wake name is not in a general model's vocabulary: unprompted,
+        // Nova-3 wrote "Hey Jarvis" as "Service" and "Yes, I wish" and the
+        // wake word never matched. Keyterm prompting biases it towards the
+        // words given here. Add your own with DEEPGRAM_KEYTERMS=a,b.
+        const terms = ['Saji', 'Hey Saji', ...(process.env.DEEPGRAM_KEYTERMS ?? '').split(',')]
+        for (const t of terms) if (t.trim()) params.append('keyterm', t.trim())
+        const upstream = await deepgramRequest(`/v1/listen?${params}`, {
+          method: 'POST',
+          headers: { authorization: `Token ${deepgramKey()}`, 'content-type': type },
+          body: Buffer.concat(chunks),
+        })
+        if (upstream.status < 200 || upstream.status >= 300) {
+          res.writeHead(upstream.status || 502, cors)
+          return res.end(upstream.text)
+        }
+        const data = JSON.parse(upstream.text)
+        const alt = data.results?.channels?.[0]?.alternatives?.[0]
+        const text = alt?.transcript ?? ''
+        // Word timings let the page cut a mis-spelt wake name off the front
+        // of the command at the moment its own detector heard it.
+        const words = (alt?.words ?? []).map((w) => ({
+          w: w.punctuated_word ?? w.word,
+          s: w.start,
+          e: w.end,
+        }))
+        res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ text: text.trim(), words }))
+      } catch (err) {
+        res.writeHead(502, cors)
+        return res.end(String(err?.message ?? err))
+      }
+    }
+
+    const key = elevenKey()
     try {
       // The filename extension is the only hint Scribe gets about the codec, so
       // derive it from the content-type the MediaRecorder reported rather than
@@ -1086,6 +1223,7 @@ if (!LOOPBACK) {
 console.log(
   `[jarvis] speech ${elevenKey() ? 'via ElevenLabs (key from MCP config)' : 'using browser fallback voice'}`,
 )
+if (!elevenKey() && deepgramKey()) console.log('[jarvis] listening via Deepgram')
 console.log(`[jarvis] model ${MODEL} · effort ${EFFORT}`)
 console.log(
   `[jarvis] MCP servers from config: ${Object.keys(MCP_SERVERS).join(', ') || 'none'}` +
@@ -1100,6 +1238,7 @@ console.log(
 // at the tool boundary from one that is broken, and this is the one place the
 // difference can be stated before anybody asks a question that depends on it.
 if (DISABLED.size) console.log(`[jarvis] disabled: ${[...DISABLED].join(', ')}`)
+if (PC_ON) console.log('[jarvis] PC control ready (power and Recycle Bin wait for a spoken yes)')
 if (!DISABLED.has('browser')) void chromeAvailable().then((ok) => {
   console.log(
     ok
@@ -1253,6 +1392,11 @@ wss.on('connection', (socket) => {
    * otherwise leave the flag standing and swallow the next real failure.
    */
   let cancelledAsk = null
+  /** Timing for the turn in flight, logged when it ends. */
+  let turnClock = null
+  /** What the user has said on this connection, for pc.mjs's spoken-yes check. */
+  let userTurns = 0
+  let lastUserText = ''
 
   const turnFinished = () =>
     new Promise((resolve) => {
@@ -1318,6 +1462,9 @@ wss.on('connection', (socket) => {
           : { jarvis_chrome: chromeServer({ allowWrites: ALLOW_WRITES }) }),
         // The camera, which unlike everything else here has to ask and wait.
         ...(DISABLED.has('camera') ? {} : { jarvis_eyes: visionServer(ask) }),
+        // This Windows PC. Reads what the user last said so the risky actions
+        // can check for a real spoken yes — see pc.mjs.
+        ...(PC_ON ? { jarvis_pc: pcServer({ heard: () => ({ turn: userTurns, text: lastUserText }) }) } : {}),
       },
       // A plain system prompt, not the claude_code preset. The preset is
       // tuned for a coding agent — verbose, file-oriented, and a large chunk
@@ -1430,12 +1577,14 @@ wss.on('connection', (socket) => {
               ev.delta?.type === 'text_delta' &&
               ev.delta.text
             ) {
+              if (turnClock && !turnClock.first) turnClock.first = Date.now()
               sendTurn({ type: 'text', delta: ev.delta.text })
             }
             if (
               ev?.type === 'content_block_start' &&
               ev.content_block?.type === 'tool_use'
             ) {
+              if (turnClock) turnClock.tools++
               announceTool(ev.content_block.id, ev.content_block.name)
             }
             break
@@ -1494,6 +1643,15 @@ wss.on('connection', (socket) => {
                 type: 'error',
                 message: RESULT_FAILURES[msg.subtype] ?? RESULT_FAILURES.default,
               })
+            }
+            if (turnClock) {
+              // How long you waited: to the first spoken word, and to the end.
+              const s = (t) => ((t - turnClock.at) / 1000).toFixed(1) + 's'
+              console.log(
+                `[jarvis] turn: first word ${turnClock.first ? s(turnClock.first) : '—'}` +
+                  ` · done ${s(Date.now())} · ${turnClock.tools} tool step(s)`,
+              )
+              turnClock = null
             }
             cancelledAsk = null
             // Whatever was waiting on this turn to finish can go now. This is
@@ -1557,6 +1715,9 @@ wss.on('connection', (socket) => {
        */
       const text = msg.text
       const id = typeof msg.id === 'string' ? msg.id : null
+      turnClock = { at: Date.now(), first: 0, tools: 0 }
+      userTurns++
+      lastUserText = text
       void settling.then(() => {
         answering = id
         if (deliver) {
