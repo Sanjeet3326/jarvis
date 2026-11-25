@@ -252,6 +252,7 @@ Everything is optional in bridge mode. Frontend settings live in `.env.local`
 | `ELEVENLABS_API_KEY` | none | Optional; enables the ElevenLabs voice + Scribe |
 | `DEEPGRAM_API_KEY` | none | Optional; listening via Deepgram when there is no ElevenLabs key (voice stays the browser's). Can live in `.env.local` |
 | `DEEPGRAM_LANGUAGE` | `en` | `multi` to follow a mix of English and Hindi |
+| `DEEPGRAM_VOICE` | none | Saji's voice via Deepgram, e.g. `aura-2-hyperion-en` or `flux-naveen-en`; unset uses the Windows voice |
 
 ### Frontend (`.env.local`)
 

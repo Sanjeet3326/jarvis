@@ -598,6 +598,63 @@ if (deepgramKey()) {
   setInterval(warm, 3000).unref()
 }
 
+/**
+ * Saji's voice through Deepgram: DEEPGRAM_VOICE=aura-2-hyperion-en (any Aura-2
+ * model) or a Flux model (flux-naveen-en, which lives on /v2/speak). Same key
+ * and same warm connection as listening. Unset means the browser's own voice.
+ */
+const DEEPGRAM_VOICE = (process.env.DEEPGRAM_VOICE ?? '').trim()
+
+/** Which voice /tts will use, or null for the browser's own. */
+function ttsEngine() {
+  if (elevenKey()) return 'elevenlabs'
+  if (deepgramKey() && DEEPGRAM_VOICE) return 'deepgram'
+  return null
+}
+
+/**
+ * One sentence of speech from Deepgram, streamed straight through to the page
+ * as it arrives. Retries once if the kept-alive socket turns out to be dead,
+ * which fails before anything is sent.
+ */
+function deepgramSpeak(text, res, cors) {
+  const path =
+    `/${DEEPGRAM_VOICE.startsWith('flux-') ? 'v2' : 'v1'}/speak?` +
+    new URLSearchParams({ model: DEEPGRAM_VOICE, encoding: 'mp3' })
+  const attempt = (retry) =>
+    new Promise((resolve, reject) => {
+      const req = https.request(
+        {
+          host: DEEPGRAM_HOST,
+          path,
+          method: 'POST',
+          agent: deepgramAgent,
+          headers: { authorization: `Token ${deepgramKey()}`, 'content-type': 'application/json' },
+        },
+        (up) => {
+          if (up.statusCode !== 200) {
+            const parts = []
+            up.on('data', (c) => parts.push(c))
+            up.on('end', () => reject(new Error(`deepgram speak ${up.statusCode}: ${Buffer.concat(parts).toString().slice(0, 160)}`)))
+            return
+          }
+          res.writeHead(200, { ...cors, 'content-type': 'audio/mpeg', 'cache-control': 'no-store' })
+          up.pipe(res)
+          up.on('end', resolve)
+          up.on('error', reject)
+        },
+      )
+      req.setTimeout(15000, () => req.destroy(new Error('deepgram speak timed out')))
+      req.on('error', (err) => {
+        if (retry && !res.headersSent && /socket hang up|ECONNRESET|EPIPE/i.test(String(err?.message))) {
+          resolve(attempt(false))
+        } else reject(err)
+      })
+      req.end(JSON.stringify({ text }))
+    })
+  return attempt(true)
+}
+
 /** Which transcriber /stt will use, or null for the browser's own. */
 function sttEngine() {
   if (elevenKey()) return 'elevenlabs'
@@ -836,10 +893,11 @@ const handleRequest = async (req, res) => {
     // with a key the app transcribes with Scribe and speaks with ElevenLabs;
     // without one it falls back to the browser's own recogniser and voice, so a
     // student with nothing configured still has a working assistant.
-    // Deepgram covers listening only, so it lights `stt` and leaves `tts` alone.
-    const eleven = Boolean(elevenKey())
+    // Deepgram lights `tts` too when DEEPGRAM_VOICE names a voice.
     res.writeHead(200, { ...cors, 'content-type': 'application/json' })
-    return res.end(JSON.stringify({ ok: true, tts: eleven, stt: sttEngine() !== null }))
+    return res.end(
+      JSON.stringify({ ok: true, tts: ttsEngine() !== null, ttsVoice: ttsEngine() === 'deepgram' ? DEEPGRAM_VOICE : ttsEngine(), stt: sttEngine() !== null }),
+    )
   }
 
   // Serve local image files to the page. Screenshots and generated art land on
@@ -963,9 +1021,9 @@ const handleRequest = async (req, res) => {
 
   if (req.method === 'POST' && req.url === '/tts') {
     const key = elevenKey()
-    if (!key) {
+    if (!ttsEngine()) {
       res.writeHead(503, cors)
-      return res.end('no elevenlabs key')
+      return res.end('no voice configured')
     }
     // A spoken line is a few hundred bytes. Anything approaching this is not a
     // sentence, and buffering it unbounded would let one request eat the heap.
@@ -995,6 +1053,16 @@ const handleRequest = async (req, res) => {
     if (!text) {
       res.writeHead(400, cors)
       return res.end('no text')
+    }
+    if (!key) {
+      try {
+        await deepgramSpeak(String(text).slice(0, 2000), res, cors)
+      } catch (err) {
+        console.warn(`[jarvis] voice failed: ${err?.message ?? err}`)
+        if (!res.headersSent) res.writeHead(502, cors)
+        res.end()
+      }
+      return
     }
     try {
       const upstream = await fetch(
@@ -1226,7 +1294,7 @@ if (!LOOPBACK) {
   )
 }
 console.log(
-  `[jarvis] speech ${elevenKey() ? 'via ElevenLabs (key from MCP config)' : 'using browser fallback voice'}`,
+  `[jarvis] speech ${elevenKey() ? 'via ElevenLabs (key from MCP config)' : ttsEngine() === 'deepgram' ? `via Deepgram voice ${DEEPGRAM_VOICE}` : 'using browser fallback voice'}`,
 )
 if (!elevenKey() && deepgramKey()) console.log('[jarvis] listening via Deepgram')
 console.log(`[jarvis] model ${MODEL} · effort ${EFFORT}`)
