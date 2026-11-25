@@ -1,4 +1,5 @@
 import * as speaker from './speaker'
+import { connect, type Rpc } from './workerRpc'
 
 /**
  * "Hey Saji", recognised from the sound itself rather than from a transcript.
@@ -44,9 +45,6 @@ const REFRACTORY_MS = 1500
 /** A live match may take at most this many times as long as the template. */
 const MAX_STRETCH = 2
 
-type Ort = typeof import('onnxruntime-web')
-type Session = import('onnxruntime-web').InferenceSession
-
 type Stored = { templates: number[][][]; mean?: number[]; at: number }
 
 export const wakeDiag = {
@@ -72,28 +70,33 @@ if (typeof window !== 'undefined') {
 // Models
 // ---------------------------------------------------------------------------
 
-let ort: Ort | null = null
-let mel: Session | null = null
-let emb: Session | null = null
+// The models run in a worker (wakeword.worker.ts). They run every 80ms while
+// listening, and on this thread each run took its time out of the animation.
+let worker: Rpc | null = null
 let loading: Promise<void> | null = null
 
 function loadModels(): Promise<void> {
   if (loading) return loading
   wakeDiag.model = 'loading'
   loading = (async () => {
-    const o = await import('onnxruntime-web')
-    // The same runtime files speaker.ts uses, served locally: the CSP refuses
-    // the CDN this would otherwise fetch them from.
-    o.env.wasm.wasmPaths = '/ort/'
-    o.env.wasm.numThreads = 1
-    const opts = { executionProviders: ['wasm'] }
-    const [m, e] = await Promise.all([
-      o.InferenceSession.create('/models/oww/melspectrogram.onnx', opts),
-      o.InferenceSession.create('/models/oww/embedding_model.onnx', opts),
-    ])
-    ort = o
-    mel = m
-    emb = e
+    const w = connect(
+      new Worker(new URL('./wakeword.worker.ts', import.meta.url), { type: 'module' }),
+      undefined,
+      (err) => {
+        // A dead worker answers nothing again; start a fresh one next time.
+        worker = null
+        loading = null
+        wakeDiag.model = 'failed'
+        wakeDiag.error = err.message
+      },
+    )
+    try {
+      await w.call('load')
+    } catch (err) {
+      w.terminate()
+      throw err
+    }
+    worker = w
     wakeDiag.model = 'ready'
   })().catch((err) => {
     wakeDiag.model = 'failed'
@@ -104,32 +107,24 @@ function loadModels(): Promise<void> {
   return loading
 }
 
+function models(): Rpc {
+  if (!worker) throw new Error('wake word models not loaded')
+  return worker
+}
+
 /** Audio in [-1, 1] → mel frames, flat [frames × 32], openWakeWord's scaling. */
 async function melFrames(pcm: Float32Array): Promise<Float32Array> {
-  const x = new Float32Array(pcm.length)
-  for (let i = 0; i < pcm.length; i++) x[i] = pcm[i] * 32767
-  const out = await mel!.run({ input: new ort!.Tensor('float32', x, [1, x.length]) })
-  const d = out.output.data as Float32Array
-  const y = new Float32Array(d.length)
-  for (let i = 0; i < d.length; i++) y[i] = d[i] / 10 + 2
-  return y
+  const copy = pcm.slice()
+  return models().call<Float32Array>('mel', { pcm: copy }, [copy.buffer])
 }
 
 /** Embeddings for every 76-frame window starting at 0, 8, 16, … */
 async function embeddings(frames: Float32Array): Promise<Float32Array[]> {
-  const n = frames.length / MEL_BINS
-  const starts: number[] = []
-  for (let s = 0; s + WINDOW <= n; s += 8) starts.push(s)
-  if (!starts.length) return []
-  const batch = new Float32Array(starts.length * WINDOW * MEL_BINS)
-  starts.forEach((s, b) =>
-    batch.set(frames.subarray(s * MEL_BINS, (s + WINDOW) * MEL_BINS), b * WINDOW * MEL_BINS),
-  )
-  const out = await emb!.run({
-    input_1: new ort!.Tensor('float32', batch, [starts.length, WINDOW, MEL_BINS, 1]),
-  })
-  const d = out.conv2d_19.data as Float32Array
-  return starts.map((_, b) => d.slice(b * EMB, (b + 1) * EMB))
+  const copy = frames.slice()
+  const d = await models().call<Float32Array>('embed', { frames: copy }, [copy.buffer])
+  const out: Float32Array[] = []
+  for (let b = 0; b * EMB < d.length; b++) out.push(d.slice(b * EMB, (b + 1) * EMB))
+  return out
 }
 
 function unit(v: Float32Array): Float32Array {

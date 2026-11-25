@@ -1,4 +1,5 @@
 import { getMic } from './audio'
+import { connect } from './workerRpc'
 
 /**
  * The voice lock: JARVIS answers one person.
@@ -150,33 +151,33 @@ function loadModel(): Promise<Embedder> {
   if (embedder) return embedder
   lockDiag.model = 'loading'
   lockDiag.error = ''
-  const files = new Map<string, number>()
   embedder = (async () => {
-    const { AutoProcessor, AutoModel, env } = await import('@huggingface/transformers')
-    // The runtime is served from our own origin (see ortRuntime in
-    // vite.config.ts); the CDN it would otherwise fetch is refused by the CSP.
-    const wasm = env.backends.onnx.wasm
-    if (wasm) wasm.wasmPaths = '/ort/'
-    const onProgress = (p: { status?: string; file?: string; progress?: number }) => {
-      if (p.status !== 'progress' || !p.file) return
-      files.set(p.file, (p.progress ?? 0) / 100)
-      let sum = 0
-      for (const v of files.values()) sum += v
-      lockDiag.progress = sum / files.size
+    // The model runs in a worker (speaker.worker.ts): on this thread every
+    // check froze the screen for half a second or more.
+    const worker = connect(
+      new Worker(new URL('./speaker.worker.ts', import.meta.url), { type: 'module' }),
+      (m) => {
+        if (m.type === 'progress') lockDiag.progress = Number(m.value)
+      },
+      () => {
+        // A dead worker answers nothing again; start a fresh one next time.
+        embedder = null
+        lockDiag.model = 'failed'
+      },
+    )
+    try {
+      await worker.call('load', { model: MODEL })
+    } catch (err) {
+      worker.terminate()
+      throw err
     }
-    const processor = await AutoProcessor.from_pretrained(MODEL, {
-      progress_callback: onProgress,
-    })
-    const model = await AutoModel.from_pretrained(MODEL, {
-      progress_callback: onProgress,
-    })
     lockDiag.model = 'ready'
     lockDiag.progress = 1
     return async (pcm: Float32Array) => {
-      const inputs = await processor(pcm)
-      // This export names its one output generically; it is the embedding.
-      const out = (await model(inputs)) as { last_hidden_state: { data: Float32Array } }
-      return normalise(Float32Array.from(out.last_hidden_state.data))
+      // A copy, handed over rather than cloned; callers keep their own buffer.
+      const copy = pcm.slice()
+      const out = await worker.call<Float32Array>('embed', { model: MODEL, pcm: copy }, [copy.buffer])
+      return normalise(out)
     }
   })().catch((err) => {
     lockDiag.model = 'failed'
