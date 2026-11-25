@@ -22,7 +22,7 @@ import { displayServer } from './panels.mjs'
 import { uiServer } from './ui.mjs'
 import { chromeAvailable, chromeServer, openUrl } from './chrome.mjs'
 import { visionServer } from './vision.mjs'
-import { pcServer, pcTools, PROMPT_PC } from './pc.mjs'
+import { knownApp, launchApp, openInBrowser, pcServer, pcTools, PROMPT_PC, warmApps } from './pc.mjs'
 import { describe as describeInstant, parse as parseInstant, resultText } from './fast.mjs'
 import { homedir, tmpdir } from 'node:os'
 import { mkdirSync, readFileSync, realpathSync } from 'node:fs'
@@ -188,8 +188,16 @@ const DISABLED = new Set(
 
 /** The pc_* tools (bridge/pc.mjs): Windows only, on unless JARVIS_DISABLE=pc. */
 const PC_ON = process.platform === 'win32' && !DISABLED.has('pc')
+/** What a turn refused by Claude's safety filter comes back as, instead of an answer. */
+const FLAGGED = /^API Error:.*safeguards flagged/i
+const FLAGGED_LINE =
+  "I'm afraid Claude's safety filter blocked that one, sir. It sometimes catches harmless security questions. " +
+  "I've cleared our conversation so we can carry on; try asking it a different way."
+
 /** Plain commands run directly, without the model (bridge/fast.mjs). On unless JARVIS_INSTANT=0. */
 const INSTANT = process.env.JARVIS_INSTANT !== '0'
+// The installed-app list instant "open X" matches against; slow to read, so now.
+if (INSTANT && PC_ON) void warmApps()
 
 /**
  * The orchestrator model. Sonnet by default: every word of a voice answer is
@@ -432,6 +440,11 @@ const PROMPT_BLADES = `The blades — the ONLY surface:
   refuse to be embedded. Choose the live page when the layout carries the
   meaning — a dashboard, a chart, a profile, a table.
 - Never read a blade aloud. Say what it means and let them look.
+- Speak BEFORE you compose. Writing a \`display\` takes many seconds and nothing
+  is heard meanwhile, so first say your answer's opening sentence aloud, then
+  build the blade. In a spoken lesson or conversation, do not compose a blade
+  at all unless they asked to see something; talk instead. Keep any markup you
+  do write short.
 
 `
 const PROMPT_INTERFACE = `The interface itself:
@@ -1470,6 +1483,10 @@ wss.on('connection', (socket) => {
   let cancelledAsk = null
   /** Timing for the turn in flight, logged when it ends. */
   let turnClock = null
+  /** Whether any of this turn's answer has been streamed to the page. */
+  let turnSpoke = false
+  /** Set when this session must be thrown away after the current turn. */
+  let resetAfterTurn = false
   /** What the user has said on this connection, for pc.mjs's spoken-yes check. */
   let userTurns = 0
   let lastUserText = ''
@@ -1494,8 +1511,18 @@ wss.on('connection', (socket) => {
     const at = Date.now()
     let result
     if (cmd.tool === 'navigate') {
-      if (DISABLED.has('browser')) return 'the browser tools are turned off'
-      result = await openUrl(cmd.args.url)
+      // Through Windows when we can: no extension permission prompt, no relay.
+      // The extension is the fallback, for a PC without the pc tools.
+      if (PC_ON) {
+        await openInBrowser(cmd.args.url)
+        result = { content: [] }
+      } else {
+        if (DISABLED.has('browser')) return 'the browser tools are turned off'
+        result = await openUrl(cmd.args.url)
+      }
+    } else if (cmd.tool === 'launch') {
+      await launchApp(cmd.args.app)
+      result = { content: [] }
     } else {
       const handler = instantPc[cmd.tool]
       if (!handler || !decideTool(`mcp__jarvis_pc__${cmd.tool}`)) return `${cmd.tool} is not available`
@@ -1705,6 +1732,7 @@ wss.on('connection', (socket) => {
               ev.delta.text
             ) {
               if (turnClock && !turnClock.first) turnClock.first = Date.now()
+              turnSpoke = true
               sendTurn({ type: 'text', delta: ev.delta.text })
             }
             if (
@@ -1751,7 +1779,21 @@ wss.on('connection', (socket) => {
             // empty text is indistinguishable from a turn that simply had
             // nothing to say — the HUD stops spinning and JARVIS stands there
             // silent. Say what happened instead.
-            if (msg.subtype === 'success') {
+            if (msg.subtype === 'success' && !turnSpoke && FLAGGED.test(msg.result ?? '')) {
+              // Claude's safety filter refused the message. That reply is not
+              // streamed, so nothing was spoken; and the flagged message stays
+              // in this session's history, so every later question is refused
+              // too — measured, "What happened, Saji?" was flagged as well.
+              // Say what happened, then close the socket: the page reconnects
+              // on a fresh session with nothing flagged in it.
+              console.error(`[jarvis] turn refused by Claude's safety filter — starting a fresh session`)
+              sendTurn({ type: 'text', delta: FLAGGED_LINE })
+              sendTurn({ type: 'done', text: FLAGGED_LINE, costUsd: msg.total_cost_usd ?? null })
+              resetAfterTurn = true
+            } else if (msg.subtype === 'success') {
+              // A reply that arrived whole rather than streamed would otherwise
+              // be shown nowhere and never spoken.
+              if (!turnSpoke && msg.result) sendTurn({ type: 'text', delta: msg.result })
               sendTurn({
                 type: 'done',
                 text: msg.result ?? '',
@@ -1785,6 +1827,16 @@ wss.on('connection', (socket) => {
               turnClock = null
             }
             cancelledAsk = null
+            turnSpoke = false
+            if (resetAfterTurn) {
+              // After the line has had time to reach the page.
+              setTimeout(() => {
+                closed = true
+                deliver?.(null)
+                session.close?.()
+                socket.close()
+              }, 300)
+            }
             // Whatever was waiting on this turn to finish can go now. This is
             // the only place a turn is genuinely over.
             finishTurn?.()
@@ -1849,7 +1901,14 @@ wss.on('connection', (socket) => {
       turnClock = { at: Date.now(), first: 0, firstTool: 0, tools: 0 }
       userTurns++
       lastUserText = text
-      const instant = INSTANT ? parseInstant(text) : null
+      let instant = INSTANT ? parseInstant(text) : null
+      if (instant?.tool === 'pc_open_app') {
+        // Only an app that is really installed. Anything else — a misheard
+        // name, "open the song" — goes to the agent without a wrong "Opening".
+        const app = PC_ON ? knownApp(instant.args.name) : null
+        instant = app ? { tool: 'launch', args: { app }, say: `Opening ${app.name}.` } : null
+        void warmApps()
+      }
       void settling.then(async () => {
         answering = id
         if (!instant) return deliverToAgent(text)

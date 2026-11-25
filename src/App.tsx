@@ -56,6 +56,8 @@ const AWAIT_SPEECH_MS = 14000
  *  drops back to standby. Long enough that you don't have to say the name
  *  again to continue a thought. */
 const FOLLOW_UP_MS = 20000
+/** While he is talking, keep listening at least this long past the last sign of speech. */
+const SPEAKING_GRACE_MS = 8000
 
 /** What he says as soon as he has finished starting up. */
 const BOOT_GREETING = "Hey buddy, what's up?"
@@ -88,6 +90,7 @@ export default function App() {
   const turn = useRef(0)
   const booting = useRef(false)
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const idleDeadline = useRef(0)
   const voicePoll = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // -- helpers --------------------------------------------------------------
@@ -123,6 +126,24 @@ export default function App() {
     s.setPhase('listening')
     sfx.play('listen')
     idleTimer.current = setTimeout(goDormant, window)
+    idleDeadline.current = Date.now() + window
+  }
+
+  /**
+   * Keep listening while the user is still talking.
+   *
+   * The window used to be a fixed timer from the end of his answer, so a long
+   * reply that ran past it was cut off mid-sentence: he went dormant, and the
+   * half-assembled turn was thrown away with the conversation. Any sign of
+   * speech now pushes the deadline out to at least SPEAKING_GRACE_MS away.
+   */
+  const stillTalking = () => {
+    if (!idleTimer.current || store.getState().phase !== 'listening') return
+    const want = Date.now() + SPEAKING_GRACE_MS
+    if (idleDeadline.current >= want) return
+    clearTimeout(idleTimer.current)
+    idleTimer.current = setTimeout(goDormant, SPEAKING_GRACE_MS)
+    idleDeadline.current = want
   }
 
   // -- one turn -------------------------------------------------------------
@@ -141,14 +162,23 @@ export default function App() {
     s.pushTurn({ id: newId(), role: 'user', text: said })
     s.setPhase('thinking')
 
-    const spk = createSpeaker()
-    speaker.current = spk
-    sfx.duck(true)
-    music.duck(true)
-
     const turnId = newId()
     let started = false
     let filled = false
+    // The answer goes on screen a sentence at a time as each is spoken, not
+    // as it streams in — otherwise the text runs seconds ahead of the voice.
+    let full = ''
+    let shown = 0
+    const spk = createSpeaker({
+      onSentence: (raw) => {
+        if (stale()) return
+        store.getState().appendToLastTurn(raw)
+        shown += raw.length
+      },
+    })
+    speaker.current = spk
+    sfx.duck(true)
+    music.duck(true)
 
     try {
       await ask(said, {
@@ -163,7 +193,7 @@ export default function App() {
             music.working(false)
             store.getState().pushTurn({ id: turnId, role: 'jarvis', text: '' })
           }
-          store.getState().appendToLastTurn(delta)
+          full += delta
           spk.push(delta)
         },
         onTool: (name) => {
@@ -190,6 +220,8 @@ export default function App() {
 
       await spk.end()
       if (stale()) return
+      // Anything the voice never reached (a failed sentence) still belongs on screen.
+      if (started && shown < full.length) store.getState().appendToLastTurn(full.slice(shown))
       sfx.play('done')
     } catch (err) {
       if (stale()) return
@@ -305,6 +337,7 @@ export default function App() {
 
   const onPartial = (text: string) => {
     store.getState().setCaption(text)
+    if (text) stillTalking()
   }
 
   const onVoiceError = (message: string) => {

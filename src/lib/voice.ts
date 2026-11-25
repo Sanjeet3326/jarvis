@@ -220,6 +220,13 @@ const CONTINUE_MS = 1600
  * for ever, and the assistant would look like it had stopped listening.
  */
 const MAX_HOLD_MS = 6000
+/** ...unless they are audibly still talking, in which case up to this long. */
+const TALKING_MAX_MS = 45000
+/** Above this many words a thought is "long", and ends only on a real pause... */
+const LONG_THOUGHT_WORDS = 12
+/** ...of this much quiet after the last sign of speech. */
+const LONG_QUIET_MS = 1500
+const wordCount = (s: string) => s.trim().split(/\s+/).filter(Boolean).length
 
 /**
  * How long to keep waiting, given what has been said so far.
@@ -251,6 +258,8 @@ type Assembler = {
 function makeAssembler(h: {
   emit: (text: string) => void
   partial: (text: string) => void
+  /** Is the user audibly speaking right now? */
+  speaking?: () => boolean
 }): Assembler {
   let held = ''
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -269,11 +278,36 @@ function makeAssembler(h: {
     if (text) h.emit(text)
   }
 
+  /**
+   * Send — unless they are still talking. MAX_HOLD_MS used to fire regardless,
+   * so in a long explanation with pauses he answered mid-sentence, the rest of
+   * the sentence then interrupted his answer, and the thought was split into
+   * pieces he answered one by one. Now the hold lasts while speech continues,
+   * up to TALKING_MAX_MS from the start, so a stuck detector cannot hold a turn
+   * open for ever.
+   */
+  let lastVoice = 0
+  const fireWhenQuiet = () => {
+    const now = Date.now()
+    if (h.speaking?.()) lastVoice = now
+    // A long thought needs a real pause, not a breath, before it counts as
+    // finished: people explaining something stop to think mid-way.
+    const needQuiet = wordCount(held) > LONG_THOUGHT_WORDS ? LONG_QUIET_MS : 0
+    const stillGoing = h.speaking?.() || now - lastVoice < needQuiet
+    if (stillGoing && now - firstAt < TALKING_MAX_MS) {
+      timer = setTimeout(fireWhenQuiet, 200)
+      return
+    }
+    fire()
+  }
+
   return {
     feed(text, active) {
       if (!text.trim()) return
       held = `${held} ${text}`.replace(/\s+/g, ' ').trim()
       if (!firstAt) firstAt = Date.now()
+      // A transcript means they were speaking until a moment ago.
+      lastVoice = Date.now()
       // The caption shows the whole thought as it assembles, not just the
       // fragment that happened to arrive last.
       h.partial(held)
@@ -283,7 +317,7 @@ function makeAssembler(h: {
       // Already talking again. Decide nothing now — the next transcript is
       // part of this same sentence and will bring more of it.
       if (active) {
-        timer = setTimeout(fire, MAX_HOLD_MS)
+        timer = setTimeout(fireWhenQuiet, MAX_HOLD_MS)
         return
       }
 
@@ -292,11 +326,13 @@ function makeAssembler(h: {
         Math.max(0, MAX_HOLD_MS - (Date.now() - firstAt)),
       )
       diag.waitedMs = wait
-      if (wait === 0) {
+      // The transcriber ends nearly every segment with a full stop, so for a
+      // long thought a full stop is not evidence they are done.
+      if (wait === 0 && wordCount(held) <= LONG_THOUGHT_WORDS) {
         fire()
         return
       }
-      timer = setTimeout(fire, wait)
+      timer = setTimeout(fireWhenQuiet, wait)
     },
     flush: fire,
     cancel() {
@@ -531,6 +567,7 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
       h.onUtterance(text)
     },
     partial: (text) => h.onPartial(text),
+    speaking: () => vad?.meter().speaking ?? false,
   })
 
   /**
@@ -684,7 +721,12 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
       // Never over the assembled text. This used to run unconditionally and
       // overwrote a half-built sentence with an ellipsis sixty times a second,
       // so a pause looked like the interface had forgotten what you just said.
-      if (assemble.held()) return
+      if (assemble.held()) {
+        // Re-sent unchanged while they keep talking: the app reads any partial
+        // as "still speaking" and holds the listening window open for it.
+        if (v > 0.04) h.onPartial(assemble.held())
+        return
+      }
       h.onPartial(v > 0.04 ? '…' : '')
     },
     onError: (message) => {

@@ -439,9 +439,21 @@ $bmp = New-Object System.Drawing.Bitmap $r.Width, $r.Height
 $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size); $g.Dispose()
 $dir = Join-Path ([Environment]::GetFolderPath('MyPictures')) 'SAJI'; New-Item -ItemType Directory -Force $dir | Out-Null
 $file = Join-Path $dir ("screenshot-" + (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss') + ".png")
-$bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
-$file`)
-        return ok(`Saved to ${out}`)
+$bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+# A smaller JPEG copy for the model to look at directly: the Pictures folder is
+# outside what its file tools may read, so a path alone left it blind.
+$scale = [math]::Min(1.0, 1568 / [math]::Max($bmp.Width, $bmp.Height))
+$small = New-Object System.Drawing.Bitmap $bmp, ([int]($bmp.Width * $scale)), ([int]($bmp.Height * $scale))
+$ms = New-Object System.IO.MemoryStream
+$small.Save($ms, [System.Drawing.Imaging.ImageFormat]::Jpeg); $small.Dispose(); $bmp.Dispose()
+@{ file = $file; jpeg = [Convert]::ToBase64String($ms.ToArray()) } | ConvertTo-Json -Compress`)
+        const r = JSON.parse(out || '{}')
+        return {
+          content: [
+            { type: 'text', text: `Saved to ${r.file}. The screenshot is attached; look at it directly.` },
+            ...(r.jpeg ? [{ type: 'image', data: r.jpeg, mimeType: 'image/jpeg' }] : []),
+          ],
+        }
       }),
     ),
 
@@ -649,3 +661,84 @@ export const PROMPT_PC = `Their PC — the \`pc_*\` tools act on the Windows lap
 - Do it, then confirm in a few words ("Done, sir. Volume at forty."). Never read out a full file path — say the file name and folder.
 
 `
+
+/**
+ * Open a web address in the default browser, the way clicking a link in any
+ * other app does. Used by instant commands (bridge/fast.mjs) for "open
+ * YouTube": it goes through Windows rather than the Chrome extension, so there
+ * is no extension permission prompt to click and no relay round trip. Only
+ * http(s) addresses — Start-Process would happily run anything else.
+ */
+export async function openInBrowser(url) {
+  if (!/^https?:\/\/[^\s"'`]+$/i.test(String(url))) throw new Error('not a web address')
+  await ps('Start-Process $env:JP_URL', { URL: url })
+}
+
+// ---------------------------------------------------------------------------
+// Installed apps, cached — for instant "open X" (bridge/fast.mjs)
+//
+// Get-StartApps takes ~4.7s on this machine, which was most of why "open
+// Slack" took 3–10s and why a misheard "open the song" wasted ten seconds
+// failing. The list is read once in the background and kept for ten minutes;
+// an instant command only fires when the name matches an app actually on the
+// list, and launches it by its AppID with no search at all.
+// ---------------------------------------------------------------------------
+
+const APP_TTL_MS = 10 * 60 * 1000
+let apps = null
+let appsAt = 0
+let appsLoading = null
+
+/** Refresh the cached app list in the background. Never throws. */
+export function warmApps() {
+  if (appsLoading || (apps && Date.now() - appsAt < APP_TTL_MS)) return appsLoading
+  appsLoading = ps(
+    `Get-StartApps | ? { $_.Name -notmatch '^(Uninstall|Install |Release Notes|Documentation|readme|license)' } | Select-Object Name, AppID | ConvertTo-Json -Compress`,
+    {},
+    30000,
+  )
+    .then((out) => {
+      apps = [].concat(JSON.parse(out || '[]')).map((a) => ({ name: a.Name, id: a.AppID, key: a.Name.toLowerCase() }))
+      appsAt = Date.now()
+    })
+    .catch((err) => console.error(`[jarvis] app list failed: ${err?.message ?? err}`))
+    .finally(() => {
+      appsLoading = null
+    })
+  return appsLoading
+}
+
+const APP_ALIASES = { 'vs code': 'visual studio code', vscode: 'visual studio code', chrome: 'google chrome' }
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * The installed app a spoken name clearly means, from the cache, or null —
+ * including null when the cache is not loaded yet. Settings pages count.
+ */
+export function knownApp(spoken) {
+  const raw = String(spoken ?? '').toLowerCase().trim()
+  if (SPECIAL[raw]) return { name: spoken, special: SPECIAL[raw] }
+  if (!apps) return null
+  const q = APP_ALIASES[raw] ?? raw
+  if (q.length < 2) return null
+  const word = new RegExp(`\\b${escapeRe(q)}\\b`)
+  let best = null
+  for (const a of apps) {
+    let s = 0
+    if (a.key === q) s = 100
+    else if (a.key.startsWith(q + ' ')) s = 80
+    else if (q.length >= 3 && word.test(a.key)) s = 60
+    else {
+      const initials = a.key.split(/[\s-]+/).filter(Boolean).map((w) => w[0]).join('')
+      if (q.replace(/\s/g, '') === initials && initials.length >= 2) s = 70
+    }
+    if (s && (!best || s > best.s || (s === best.s && a.key.length < best.key.length))) best = { ...a, s }
+  }
+  return best && best.s >= 60 ? { name: best.name, id: best.id } : null
+}
+
+/** Launch an app found by knownApp. */
+export async function launchApp(app) {
+  if (app.special) await ps('Start-Process $env:JP_TARGET', { TARGET: app.special })
+  else await ps('Start-Process ("shell:AppsFolder\\" + $env:JP_ID)', { ID: app.id })
+}

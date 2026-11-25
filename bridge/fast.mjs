@@ -192,6 +192,7 @@ export function resultText(result) {
  * "close it" or "turn it back up" next turn still makes sense.
  */
 export function describe(cmd) {
-  if (cmd.tool === 'navigate') return `opened ${cmd.args.url} in Chrome`
+  if (cmd.tool === 'navigate') return `opened ${cmd.args.url} in the browser`
+  if (cmd.tool === 'launch') return `opened the app ${cmd.args.app.name}`
   return `${cmd.tool}(${JSON.stringify(cmd.args)})`
 }

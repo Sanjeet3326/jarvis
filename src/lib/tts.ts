@@ -350,11 +350,22 @@ function shape(text: string): string {
 
 type Item = {
   text: string
-  /** Generation starts one sentence ahead, not all at once. */
+  /** The sentence as written, for showing on screen; absent for fillers. */
+  raw?: string
+  /** Generation starts a little ahead, not all at once. */
   audio?: Promise<string | null> | null
 }
 
-export function createSpeaker(): Speaker {
+type SpeakerOptions = {
+  /**
+   * Called with each sentence of the answer as it starts being spoken, so the
+   * screen can show it then rather than seconds ahead of the voice. Fillers
+   * from say() are not reported.
+   */
+  onSentence?: (raw: string) => void
+}
+
+export function createSpeaker(opts: SpeakerOptions = {}): Speaker {
   const queue: Item[] = []
   let buffer = ''
   let cancelled = false
@@ -376,9 +387,14 @@ export function createSpeaker(): Speaker {
     // Shape once here so both engines get the same text — stripped markdown,
     // and the comma before "sir" that buys the beat.
     const text = shape(sentence)
-    if (!text) return
+    if (!text) {
+      // Nothing to say (a bare list marker, a code fence) but still part of
+      // the answer, so it goes on screen at once.
+      if (!priority) opts.onSentence?.(sentence)
+      return
+    }
 
-    const item: Item = { text }
+    const item: Item = { text, raw: priority ? undefined : sentence }
     if (priority) {
       // Genuinely ahead of the queue this time. The old `say()` appended to the
       // same chain and only appeared to preempt because it was called when the
@@ -387,6 +403,11 @@ export function createSpeaker(): Speaker {
     } else {
       queue.push(item)
     }
+    // Start generating now if this is one of the next two up. Without this, a
+    // sentence that streamed in while another was already playing was only
+    // generated once that one finished, so every full stop cost a whole
+    // round trip of silence (1.5-3s measured for a Deepgram sentence).
+    if (pumping) primeAhead()
     void pump()
   }
 
@@ -419,6 +440,17 @@ export function createSpeaker(): Speaker {
     if (item && item.audio === undefined) item.audio = synthesise(item.text)
   }
 
+  /**
+   * The next two sentences, and no more. One ahead was not enough: a cloud
+   * sentence takes about as long to generate as to play. Priming the whole
+   * queue would fire every request at once — parallel cloud POSTs, or
+   * concurrent generations against a single ONNX session.
+   */
+  const primeAhead = () => {
+    prime(queue[0])
+    prime(queue[1])
+  }
+
   async function pump(): Promise<void> {
     if (pumping) return
     pumping = true
@@ -429,10 +461,7 @@ export function createSpeaker(): Speaker {
         if (!item) break
 
         prime(item)
-        // Exactly one sentence ahead. Priming the whole queue fires every
-        // request at once — four parallel cloud POSTs, or four concurrent
-        // generations against a single ONNX session.
-        prime(queue[0])
+        primeAhead()
 
         await speakOne(item)
       }
@@ -448,6 +477,8 @@ export function createSpeaker(): Speaker {
     try {
       const url = item.audio ? await item.audio : null
       if (cancelled) return
+      // Shown now, as its sound is about to start — not when it was queued.
+      if (item.raw !== undefined) opts.onSentence?.(item.raw)
       // A failed generation is not a failed turn — drop to the system voice.
       if (url) {
         await playUrl(url, item.text)
@@ -755,6 +786,89 @@ export function createSpeaker(): Speaker {
   }
 }
 
+/**
+ * Play MP3 as it downloads instead of after.
+ *
+ * The bridge streams each sentence through as the voice service generates it,
+ * but `res.blob()` waits for the last byte: measured, headers came back in
+ * ~0.5s and the full sentence ~2.5s later, so speech started ~3s after the
+ * text. A MediaSource lets the audio element start on the first chunk. Returns
+ * null where MediaSource cannot take MP3, and the caller falls back to a blob.
+ */
+function streamedUrl(res: Response): string | null {
+  if (!res.body || typeof MediaSource === 'undefined' || !MediaSource.isTypeSupported('audio/mpeg')) {
+    return null
+  }
+  // Download starts now, not when the element opens the source: a sentence
+  // primed ahead may not be played for several seconds, and it must arrive
+  // in the meantime or the gaps between sentences come back.
+  const reader = res.body.getReader()
+  const chunks: Uint8Array[] = []
+  let finished = false
+  let wake: (() => void) | null = null
+  const poke = () => {
+    const w = wake
+    wake = null
+    w?.()
+  }
+  void (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        chunks.push(value)
+        poke()
+      }
+    } catch {
+      /* a broken download ends what we have */
+    }
+    finished = true
+    poke()
+  })()
+
+  const ms = new MediaSource()
+  const url = URL.createObjectURL(ms)
+  ms.addEventListener(
+    'sourceopen',
+    () => {
+      const sb = ms.addSourceBuffer('audio/mpeg')
+      const idle = () =>
+        sb.updating
+          ? new Promise<void>((r) => sb.addEventListener('updateend', () => r(), { once: true }))
+          : Promise.resolve()
+      void (async () => {
+        try {
+          for (;;) {
+            if (ms.readyState !== 'open') return
+            const next = chunks.shift()
+            if (next) {
+              await idle()
+              if (ms.readyState !== 'open') return
+              sb.appendBuffer(next as BufferSource)
+              continue
+            }
+            if (finished) break
+            await new Promise<void>((r) => (wake = r))
+          }
+          await idle()
+          if (ms.readyState === 'open') ms.endOfStream()
+        } catch {
+          // Stopped (barge-in) or the source broke; end the stream so the
+          // element finishes instead of waiting forever.
+          try {
+            if (ms.readyState === 'open') ms.endOfStream()
+          } catch {
+            /* already closed */
+          }
+          void reader.cancel().catch(() => {})
+        }
+      })()
+    },
+    { once: true },
+  )
+  return url
+}
+
 /** Only used when USE_ELEVENLABS is on. Bridge proxy first (it already holds
  *  the key), then a direct key, then null to fall back to the native voice. */
 async function fetchCloudAudio(text: string): Promise<string | null> {
@@ -764,7 +878,7 @@ async function fetchCloudAudio(text: string): Promise<string | null> {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text }),
     })
-    if (res.ok) return URL.createObjectURL(await res.blob())
+    if (res.ok) return streamedUrl(res) ?? URL.createObjectURL(await res.blob())
   } catch {
     /* fall through */
   }
