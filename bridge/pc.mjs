@@ -70,6 +70,23 @@ Add-Type -Namespace JP -Name Keys -MemberDefinition '[DllImport("user32.dll")] p
 function Tap([byte]$k) { [JP.Keys]::keybd_event($k,0,0,[UIntPtr]::Zero); [JP.Keys]::keybd_event($k,0,2,[UIntPtr]::Zero) }
 `
 
+/**
+ * The connected screens, numbered left to right, in real pixels. The process
+ * is made per-monitor DPI aware first: without it Windows hands PowerShell
+ * scaled coordinates, and with a 125% laptop beside a 100% monitor the
+ * numbers stop lining up between screens.
+ */
+const SCREENS = `
+Add-Type -Namespace JP -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(System.IntPtr v);'
+[JP.Dpi]::SetProcessDpiAwarenessContext([IntPtr]-4) | Out-Null
+Add-Type -AssemblyName System.Windows.Forms
+$screens = @([System.Windows.Forms.Screen]::AllScreens | Sort-Object { $_.Bounds.X }, { $_.Bounds.Y })
+function Describe($s) {
+  $n = [array]::IndexOf($screens, ($screens | ? { $_.DeviceName -eq $s.DeviceName } | Select-Object -First 1)) + 1
+  @{ number = $n; main = $s.Primary; width = $s.Bounds.Width; height = $s.Bounds.Height }
+}
+`
+
 const AUDIO = `
 Add-Type -TypeDefinition @'
 using System.Runtime.InteropServices;
@@ -285,6 +302,71 @@ $closed = @($p | % { $null = $_.CloseMainWindow(); "$($_.ProcessName): $($_.Main
         const r = JSON.parse(out || '{}')
         const list = [].concat(r.closed ?? [])
         return list.length ? ok(`Asked to close: ${list.join('; ')}.`) : fail(`No open window matching "${name}".`)
+      }),
+    ),
+
+    tool(
+      'pc_monitors',
+      'List the screens connected to this PC, numbered left to right, with size and which is the main one. Use before moving a window when it is unclear which screen they mean.',
+      {},
+      guard(async () => ok(await ps(SCREENS + `@($screens | % { Describe $_ }) | ConvertTo-Json -Compress`))),
+    ),
+
+    tool(
+      'pc_move_window',
+      'Move an open app\'s window to another screen ("put Spotify on my monitor", "move Chrome to the laptop screen"). ' +
+        'app "saji" (or "yourself") moves Saji\'s own window, which then fills that screen and stays there. ' +
+        'screen: "other"/"next" = the next screen, "main" = the main (primary) screen, "left"/"right", "biggest", or a number from pc_monitors.',
+      {
+        app: z.string().min(2).max(80).describe('App or window name as said, or "saji".'),
+        screen: z.string().min(1).max(20).describe('other | next | main | left | right | biggest | 1 | 2 ...'),
+      },
+      guard(async ({ app, screen }) => {
+        const self = /^(saji|yourself|you|your ?self|this|jarvis|the assistant)$/i.test(app.trim())
+        const out = await ps(
+          SCREENS +
+            `
+Add-Type -Namespace JP -Name Win -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool SetWindowPos(System.IntPtr h, System.IntPtr after, int x, int y, int w, int hh, uint f);
+[DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int cmd);
+[DllImport("user32.dll")] public static extern bool IsZoomed(System.IntPtr h);
+[DllImport("user32.dll")] public static extern bool IsIconic(System.IntPtr h);
+[DllImport("user32.dll")] public static extern bool GetWindowRect(System.IntPtr h, out RECT r);
+public struct RECT { public int L, T, R, B; }
+'@
+$q = $env:JP_APP.ToLower().Trim()
+if ($env:JP_SELF -eq '1') {
+  $p = Get-Process electron -ErrorAction SilentlyContinue | ? { $_.MainWindowTitle -eq 'S.A.J.I.' } | Select-Object -First 1
+} else {
+  $skip = 'electron','explorer','dwm','winlogon','csrss','svchost','lsass','powershell','node'
+  $p = Get-Process | ? { $_.MainWindowHandle -ne 0 -and $skip -notcontains $_.ProcessName.ToLower() -and ($_.ProcessName.ToLower().Contains($q.Replace(' ','')) -or $_.MainWindowTitle.ToLower().Contains($q)) } | Select-Object -First 1
+}
+if (-not $p) { throw "No open window matching '$($env:JP_APP)'." }
+$h = $p.MainWindowHandle
+$from = [System.Windows.Forms.Screen]::FromHandle($h)
+$i = [array]::IndexOf($screens, ($screens | ? { $_.DeviceName -eq $from.DeviceName } | Select-Object -First 1))
+$s = $env:JP_SCREEN.ToLower().Trim()
+$to = switch -regex ($s) {
+  '^(other|next|second|another)$' { $screens[($i + 1) % $screens.Count] }
+  '^(main|primary|laptop)$' { $screens | ? { $_.Primary } | Select-Object -First 1 }
+  '^left$' { $screens[0] }
+  '^right$' { $screens[$screens.Count - 1] }
+  '^(biggest|big|large|monitor)$' { $screens | Sort-Object { $_.Bounds.Width * $_.Bounds.Height } -Descending | Select-Object -First 1 }
+  '^\\d+$' { $n = [int]$s; if ($n -lt 1 -or $n -gt $screens.Count) { throw "There are only $($screens.Count) screens." }; $screens[$n - 1] }
+  default { throw "Unknown screen '$s'." }
+}
+$wa = $to.WorkingArea
+$wasMax = [JP.Win]::IsZoomed($h)
+if ($wasMax -or [JP.Win]::IsIconic($h)) { [JP.Win]::ShowWindow($h, 9) | Out-Null }
+$r = New-Object JP.Win+RECT; [JP.Win]::GetWindowRect($h, [ref]$r) | Out-Null
+$w = [math]::Min($r.R - $r.L, $wa.Width); $hh = [math]::Min($r.B - $r.T, $wa.Height)
+$x = $wa.X + [int](($wa.Width - $w) / 2); $y = $wa.Y + [int](($wa.Height - $hh) / 2)
+[JP.Win]::SetWindowPos($h, [IntPtr]::Zero, $x, $y, $w, $hh, 0x0014) | Out-Null
+if ($wasMax) { [JP.Win]::ShowWindow($h, 3) | Out-Null }
+@{ moved = $p.MainWindowTitle; to = (Describe $to); was = (Describe $from) } | ConvertTo-Json -Compress -Depth 3`,
+          { APP: app, SCREEN: screen, SELF: self ? '1' : '0' },
+        )
+        return ok(out)
       }),
     ),
 
@@ -558,6 +640,9 @@ else { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($p,'OnlyErrorDialog
 
 export const PROMPT_PC = `Their PC — the \`pc_*\` tools act on the Windows laptop you run on:
 - Apps: \`pc_open_app\` / \`pc_close_app\` by the name they say. Websites are still the chrome tools.
+- Screens: they have more than one. "Put X on my monitor / the other screen / the laptop" is \`pc_move_window\`;
+  "move yourself / show up on my monitor" is \`pc_move_window\` with app "saji". \`pc_monitors\` lists the screens.
+  "My monitor" means the external one (screen "monitor"), "the laptop" means the main one (screen "main").
 - Sound and music: \`pc_volume\`, \`pc_media\` (play/pause, next, previous). Screen: \`pc_brightness\`, \`pc_screenshot\`, \`pc_lock\`.
 - "Battery", "how's my laptop": \`pc_status\`. Files: \`pc_find_files\` then \`pc_open_path\`; \`pc_make_folder\`.
 - \`pc_recycle\` and \`pc_power\` refuse until the user says yes. When one hands you a question, ASK it in one short sentence and stop. Only after they answer yes, call again with the code. Never answer for them, never call again in the same turn.

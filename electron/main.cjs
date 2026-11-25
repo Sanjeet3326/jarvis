@@ -145,19 +145,61 @@ let win = null
 let tray = null
 let hintedTray = false
 
+// ------------------------------------------------- which screen Saji lives on
+
+const SETTINGS = () => path.join(app.getPath('userData'), 'settings.json')
+function readSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS(), 'utf8'))
+  } catch {
+    return {}
+  }
+}
+function writeSettings(patch) {
+  try {
+    fs.writeFileSync(SETTINGS(), JSON.stringify({ ...readSettings(), ...patch }))
+  } catch { /* not fatal: the choice just isn't remembered */ }
+}
+
+/** The screen Saji fills: the one you chose (tray, voice, or by moving it),
+ *  or the main screen when that one is not connected. */
+function homeDisplay() {
+  const id = readSettings().display
+  return screen.getAllDisplays().find((d) => d.id === id) ?? screen.getPrimaryDisplay()
+}
+
+/** Fill a screen, and remember it as Saji's home. */
+function placeOn(display) {
+  if (!win || win.isDestroyed()) return
+  writeSettings({ display: display.id })
+  const b = win.getBounds()
+  const w = display.workArea
+  if (b.x !== w.x || b.y !== w.y || b.width !== w.width || b.height !== w.height) win.setBounds(w)
+  if (tray && trayMenu) tray.setContextMenu(trayMenu())
+}
+
+/** "Laptop screen 1536×864" / "Monitor 2560×1440, on the left". */
+function displayLabel(d) {
+  const p = screen.getPrimaryDisplay()
+  const side = d.id === p.id ? '' : d.bounds.x < p.bounds.x ? ', on the left' : d.bounds.x > p.bounds.x ? ', on the right' : d.bounds.y < p.bounds.y ? ', above' : ', below'
+  return `${d.internal ? 'Laptop screen' : 'Monitor'} ${d.size.width}×${d.size.height}${side}`
+}
+
 function createWindow() {
   win = new BrowserWindow({
     // Part of the desktop, not an app window: no title bar, no buttons, no
-    // taskbar button, and the whole screen above the taskbar. It comes and
-    // goes on its own; Escape, Ctrl+Space and the tray put it away by hand.
-    ...screen.getPrimaryDisplay().workArea,
+    // taskbar button, and the whole of one screen above the taskbar. It comes
+    // and goes on its own; Escape, Ctrl+Space and the tray put it away by hand.
+    ...homeDisplay().workArea,
     frame: false,
     // No invisible resize border: without this the window spills ~10px past
     // the screen edges.
     thickFrame: false,
     skipTaskbar: true,
     resizable: false,
-    movable: false,
+    // Movable so it can be sent to another screen (Win+Shift+Arrow, the
+    // pc_move_window tool); wherever it lands, it snaps to fill that screen.
+    movable: true,
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
@@ -209,11 +251,28 @@ function createWindow() {
 
   win.webContents.on('did-finish-load', () => void autoInitialise())
 
-  // Follow the screen if its size or the taskbar changes.
-  const fit = () => win && !win.isDestroyed() && win.setBounds(screen.getPrimaryDisplay().workArea)
+  // Follow the screen if its size or the taskbar changes, or it is unplugged.
+  const fit = () => {
+    if (!win || win.isDestroyed()) return
+    if (tray && trayMenu) tray.setContextMenu(trayMenu())
+    win.setBounds(homeDisplay().workArea)
+  }
   screen.on('display-metrics-changed', fit)
   screen.on('display-added', fit)
   screen.on('display-removed', fit)
+
+  // Moved to another screen from outside (Win+Shift+Arrow, or Saji's own
+  // pc_move_window tool): make that screen home and fill it.
+  let settle = null
+  win.on('move', () => {
+    clearTimeout(settle)
+    settle = setTimeout(() => {
+      if (!win || win.isDestroyed()) return
+      const d = screen.getDisplayMatching(win.getBounds())
+      if (d.id !== homeDisplay().id) log('app', `moved to ${displayLabel(d)}`)
+      placeOn(d)
+    }, 250)
+  })
   win.webContents.on('console-message', (e) => {
     const m = e.message ?? ''
     if (e.level === 'error' || e.level === 3 || /\[jarvis\]/.test(m)) log('page', m)
@@ -305,6 +364,18 @@ function buildTray() {
   const menu = () =>
     Menu.buildFromTemplate([
       { label: 'Show SAJI', click: show },
+      {
+        label: 'Show Saji on',
+        submenu: screen.getAllDisplays().map((d) => ({
+          label: displayLabel(d),
+          type: 'radio',
+          checked: d.id === homeDisplay().id,
+          click: () => {
+            placeOn(d)
+            pop()
+          },
+        })),
+      },
       { label: `Shortcut: ${hotkey ?? 'none'}`, enabled: false },
       { label: 'PC controls: on (risky ones ask first)', enabled: false },
       { label: writes ? 'Shell and file writes: ON' : 'Shell and file writes: off', enabled: false },

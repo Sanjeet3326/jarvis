@@ -50,8 +50,10 @@ animation shows: the title wordmark is off (`brand` in `src/store.ts`). Pass
 The app (`electron/main.cjs`) starts the bridge and the face itself, presses
 INITIALISE for you, and keeps listening when the window is closed. **Ctrl+Space**
 shows or hides it from anywhere (falls back to Ctrl+Alt+J if something else owns
-Ctrl+Space). Right-click the tray icon for **Start with Windows**, the log and
-**Quit**. Output goes to `logs/desktop.log`.
+Ctrl+Space). Right-click the tray icon for **Show Saji on** (pick a screen), **Start with
+Windows**, the log and **Quit**. Saji fills whichever screen it is on and
+remembers it: choose in the tray, say "move yourself to my monitor", or use
+Win+Shift+Arrow. Output goes to `logs/desktop.log`.
 
 ---
 
@@ -315,6 +317,7 @@ file, and what you say is passed in as data, never pasted into the script.
 | "volume 40", "turn it up", "mute" | `pc_volume` |
 | "pause", "next song" | `pc_media` |
 | "brightness 70" | `pc_brightness` |
+| "put Spotify on my monitor", "move yourself to the laptop screen" | `pc_move_window`, `pc_monitors` |
 | "take a screenshot" (saved to Pictures\SAJI), "lock my PC" | `pc_screenshot`, `pc_lock` |
 | "what's my battery", "how much space is left" | `pc_status` |
 | "find my CV", "open downloads", "make a folder called Projects on the desktop" | `pc_find_files` (Windows Search index), `pc_open_path`, `pc_make_folder` |
