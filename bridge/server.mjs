@@ -20,9 +20,10 @@ import { WebSocketServer } from 'ws'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { displayServer } from './panels.mjs'
 import { uiServer } from './ui.mjs'
-import { chromeAvailable, chromeServer } from './chrome.mjs'
+import { chromeAvailable, chromeServer, openUrl } from './chrome.mjs'
 import { visionServer } from './vision.mjs'
-import { pcServer, PROMPT_PC } from './pc.mjs'
+import { pcServer, pcTools, PROMPT_PC } from './pc.mjs'
+import { describe as describeInstant, parse as parseInstant, resultText } from './fast.mjs'
 import { homedir, tmpdir } from 'node:os'
 import { mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
@@ -187,6 +188,8 @@ const DISABLED = new Set(
 
 /** The pc_* tools (bridge/pc.mjs): Windows only, on unless JARVIS_DISABLE=pc. */
 const PC_ON = process.platform === 'win32' && !DISABLED.has('pc')
+/** Plain commands run directly, without the model (bridge/fast.mjs). On unless JARVIS_INSTANT=0. */
+const INSTANT = process.env.JARVIS_INSTANT !== '0'
 
 /**
  * The orchestrator model. Sonnet by default: every word of a voice answer is
@@ -1471,6 +1474,57 @@ wss.on('connection', (socket) => {
   let userTurns = 0
   let lastUserText = ''
 
+  /**
+   * Instant commands (bridge/fast.mjs), run here without the agent.
+   *
+   * Their own copy of the PC tools: the instant path never uses the ones that
+   * wait for a spoken yes, so it needs none of the agent's confirmation state.
+   * What they did is queued in `instantLog` and told to the agent with the next
+   * question that does reach it, so "turn it back up" still has its referent.
+   */
+  const instantPc = PC_ON
+    ? Object.fromEntries(
+        pcTools({ heard: () => ({ turn: userTurns, text: lastUserText }) }).map((t) => [t.name, t.handler]),
+      )
+    : {}
+  const instantLog = []
+
+  /** Run one instant command. Resolves to null when it worked, or the failure text. */
+  async function runInstant(cmd) {
+    const at = Date.now()
+    let result
+    if (cmd.tool === 'navigate') {
+      if (DISABLED.has('browser')) return 'the browser tools are turned off'
+      result = await openUrl(cmd.args.url)
+    } else {
+      const handler = instantPc[cmd.tool]
+      if (!handler || !decideTool(`mcp__jarvis_pc__${cmd.tool}`)) return `${cmd.tool} is not available`
+      result = await handler(cmd.args)
+    }
+    const failed = result?.isError ? resultText(result) || 'it failed' : null
+    console.log(
+      `[jarvis] instant ${cmd.tool} ${JSON.stringify(cmd.args)} -> ${failed ? 'FAILED' : 'ok'} in ${((Date.now() - at) / 1000).toFixed(1)}s`,
+    )
+    if (!failed) instantLog.push(describeInstant(cmd))
+    return failed
+  }
+
+  /** Hand a question to the agent, with anything done instantly since its last turn. */
+  function deliverToAgent(text) {
+    let prompt = text
+    if (instantLog.length) {
+      prompt =
+        `[Done directly since your last turn, without you: ${instantLog.splice(0).join('; ')}.]\n\n` + text
+    }
+    if (deliver) {
+      const resolve = deliver
+      deliver = null
+      resolve(prompt)
+    } else {
+      inbox.push(prompt)
+    }
+  }
+
   const turnFinished = () =>
     new Promise((resolve) => {
       finishTurn = resolve
@@ -1657,7 +1711,10 @@ wss.on('connection', (socket) => {
               ev?.type === 'content_block_start' &&
               ev.content_block?.type === 'tool_use'
             ) {
-              if (turnClock) turnClock.tools++
+              if (turnClock) {
+                turnClock.tools++
+                if (!turnClock.firstTool) turnClock.firstTool = Date.now()
+              }
               announceTool(ev.content_block.id, ev.content_block.name)
             }
             break
@@ -1721,7 +1778,8 @@ wss.on('connection', (socket) => {
               // How long you waited: to the first spoken word, and to the end.
               const s = (t) => ((t - turnClock.at) / 1000).toFixed(1) + 's'
               console.log(
-                `[jarvis] turn: first word ${turnClock.first ? s(turnClock.first) : '—'}` +
+                `[jarvis] turn: first tool ${turnClock.firstTool ? s(turnClock.firstTool) : '—'}` +
+                  ` · first word ${turnClock.first ? s(turnClock.first) : '—'}` +
                   ` · done ${s(Date.now())} · ${turnClock.tools} tool step(s)`,
               )
               turnClock = null
@@ -1788,18 +1846,38 @@ wss.on('connection', (socket) => {
        */
       const text = msg.text
       const id = typeof msg.id === 'string' ? msg.id : null
-      turnClock = { at: Date.now(), first: 0, tools: 0 }
+      turnClock = { at: Date.now(), first: 0, firstTool: 0, tools: 0 }
       userTurns++
       lastUserText = text
-      void settling.then(() => {
+      const instant = INSTANT ? parseInstant(text) : null
+      void settling.then(async () => {
         answering = id
-        if (deliver) {
-          const resolve = deliver
-          deliver = null
-          resolve(text)
-        } else {
-          inbox.push(text)
+        if (!instant) return deliverToAgent(text)
+
+        // Say it as it happens: the line goes out before the tool runs, so
+        // there is no silence at all on the common path.
+        const at = Date.now()
+        sendTurn({ type: 'text', delta: instant.say + ' ' })
+        let failed
+        try {
+          failed = await runInstant(instant)
+        } catch (err) {
+          failed = String(err?.message ?? err)
         }
+        // Barged in on meanwhile: the client has moved on, and so do we.
+        if (answering !== id) return
+        if (!failed) {
+          console.log(`[jarvis] turn: instant · done ${((Date.now() - at) / 1000).toFixed(1)}s`)
+          turnClock = null
+          sendTurn({ type: 'done', text: instant.say })
+          return
+        }
+        // It did not work. The agent takes over on the same turn, knowing what
+        // was tried, so the user hears why and what to do instead.
+        deliverToAgent(
+          `[I already tried this directly with ${describeInstant(instant)} and said "${instant.say}" aloud, ` +
+            `but it failed: ${failed}. Continue from there; do not repeat "${instant.say}".]\n\n${text}`,
+        )
       })
     }
 

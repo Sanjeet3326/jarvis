@@ -955,3 +955,11 @@ export function chromeServer({ allowWrites }) {
 export async function chromeAvailable() {
   return (await findSocket()) !== null
 }
+
+/**
+ * Open a URL in the user's Chrome and return as soon as the navigation is
+ * accepted. For instant commands (bridge/fast.mjs): "open YouTube" is done the
+ * moment the tab starts loading, and nothing is going to read the page, so the
+ * settle loop chrome_navigate runs for the agent is skipped.
+ */
+export const openUrl = (url) => forward('navigate')({ url })
