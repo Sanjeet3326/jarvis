@@ -119,8 +119,24 @@ function setSpeaking(text: string) {
   if (speaking) {
     recent = speaking
     recentUntil = Date.now() + ECHO_TAIL_MS
+    lastLine = speaking
+    lastLineEnded = Date.now()
   }
   speaking = ''
+}
+
+let lastLine = ''
+let lastLineEnded = 0
+
+/**
+ * What he said in the last `ms` milliseconds, including anything still playing.
+ * Longer-lived than speakingNow(): the start of a recording can reach back
+ * several seconds, and "Yes, sir." from the wake reply ends up glued to the
+ * front of the user's command ("Yes, sir. Check my mail.").
+ */
+export function saidWithin(ms: number): string {
+  const tail = Date.now() - lastLineEnded <= ms ? lastLine : ''
+  return `${tail} ${speaking}`.trim()
 }
 
 /**

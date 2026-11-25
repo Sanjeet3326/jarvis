@@ -429,7 +429,12 @@ export async function verifySoon(ms: number): Promise<Verdict> {
  */
 export async function prepare(): Promise<void> {
   await startTap()
-  if (print) void loadModel().catch(() => {})
+  console.info(
+    print
+      ? `[jarvis] voice lock: ON · threshold ${threshold().toFixed(2)}`
+      : '[jarvis] voice lock: OFF — no voiceprint saved yet (L panel); anyone can talk to Saji',
+  )
+  if (print) void loadModel().catch((err) => console.info(`[jarvis] voice lock: model FAILED — ${err?.message ?? err}`))
 }
 
 // ---------------------------------------------------------------------------

@@ -413,14 +413,20 @@ export function firedBetween(from: number, to: number): number | null {
 
 /** Start listening, if there is anything to listen for. Safe to call often. */
 export async function start(): Promise<void> {
-  if (running || !enrolled()) return
+  if (running) return
+  if (!enrolled()) {
+    console.info('[jarvis] wake word detector: OFF — no "Hey Saji" recordings saved yet (L panel)')
+    return
+  }
   running = true
   try {
     await loadModels()
-  } catch {
+  } catch (err) {
+    console.info(`[jarvis] wake word detector: FAILED to load — ${(err as Error)?.message ?? err}`)
     running = false
     return
   }
+  console.info(`[jarvis] wake word detector: ON · ${templates.length} recordings · threshold ${threshold_.toFixed(2)}`)
   matchers = templates.map((t) => new Matcher(t))
   speaker.onAudio((chunk) => {
     if (!enrolled()) return
@@ -466,6 +472,7 @@ async function drain() {
         wakeDiag.lastFire = Date.now()
         wakeDiag.lastScore = score
         wakeDiag.history.push({ at: Date.now(), score })
+        console.info(`[jarvis] wake word detector fired · score ${score.toFixed(2)}`)
         if (wakeDiag.history.length > 40) wakeDiag.history.shift()
         for (const fn of listeners) fn(now)
       }

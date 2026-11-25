@@ -417,11 +417,15 @@ export async function renderPage(url, mode, bridgeOrigin) {
   // here — an iframe gets its rules from its own response — so this is the only
   // thing standing between a hostile page and script execution on an origin
   // that is allowed to open the agent socket.
+  // Live mode relies on the <base> toLive() injects, so base-uri has to admit
+  // exactly that page's origin — with 'none' the browser refused it and every
+  // relative stylesheet and image broke. A base only changes where relative
+  // URLs resolve; script-src still allows nothing but our nonce.
   const csp = live
     ? "default-src 'none'; img-src https: http: data: blob:; " +
       "style-src 'unsafe-inline' https: http: data:; font-src https: http: data:; " +
       `media-src https: http: data:; script-src 'nonce-${nonce}'; form-action 'none'; ` +
-      "frame-src 'none'; object-src 'none'; base-uri 'none'"
+      `frame-src 'none'; object-src 'none'; base-uri ${new URL(page.url).origin}`
     : `default-src 'none'; img-src ${bridgeOrigin} data:; ` +
       `style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; form-action 'none'; ` +
       "frame-src 'none'; object-src 'none'; base-uri 'none'"

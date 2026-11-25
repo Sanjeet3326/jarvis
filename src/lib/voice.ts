@@ -1,6 +1,6 @@
 import { BRIDGE_HTTP_URL } from '../config'
 import { getMic } from './audio'
-import { speakingNow, speakingSince } from './tts'
+import { saidWithin, speakingNow, speakingSince } from './tts'
 import { startVad, type Vad } from './vad'
 import { caps } from './capabilities'
 import * as speaker from './speaker'
@@ -313,10 +313,12 @@ function makeAssembler(h: {
 // Hearing himself
 // ---------------------------------------------------------------------------
 
+// Letters, combining marks and digits of any script: an a-z-only filter turned
+// a Hindi-script sentence into nothing, which isEcho then threw away as echo.
 const norm = (s: string) =>
   s
     .toLowerCase()
-    .replace(/[^a-z0-9' ]+/g, ' ')
+    .replace(/[^\p{L}\p{M}\p{N}' ]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim()
 
@@ -353,6 +355,33 @@ const STOP = new Set(
  * mangles its own playback badly enough that a substring match rarely holds,
  * but the *words* survive.
  */
+/**
+ * His own words at the START of what was heard, as opposed to all of it.
+ *
+ * The recording that carries the user's command often begins while his short
+ * reply ("Yes, sir.") is still coming out of the speakers, so the transcript
+ * arrives as "Yes, sir. Check my mail." Returns how many leading words are
+ * his and the rest, or null when the sentence does not start with his words
+ * or nothing of the user's would be left.
+ */
+function leadingEcho(heard: string, spoken: string): { rest: string; n: number } | null {
+  if (!spoken) return null
+  const mine = new Set(norm(spoken).split(' ').filter(Boolean))
+  const raw = heard.trim().split(/\s+/)
+  let n = 0
+  while (n < raw.length) {
+    const w = norm(raw[n])
+    if (!w || !mine.has(w)) break
+    n++
+  }
+  if (n === 0 || n >= raw.length) return null
+  return { rest: raw.slice(n).join(' '), n }
+}
+
+/** How much the voice lock is relaxed for a recording that is partly his own
+ *  voice: the mixture always scores lower than the user alone. */
+const MIXED_SLACK = 0.15
+
 function isEcho(heard: string, spoken: string): boolean {
   if (!spoken) return false
   if (OVERRIDE.test(heard)) return false
@@ -429,6 +458,9 @@ export const diag = {
  *  the difference between debugging it and speculating about it. */
 function drop(why: string) {
   diag.dropped = why
+  // Into logs/desktop.log via the desktop app, so a bad session can be read
+  // afterwards instead of being lost with the window.
+  console.info(`[jarvis] voice: ${why}`)
 }
 
 if (typeof window !== 'undefined') {
@@ -530,8 +562,14 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
         return
       }
       const { text, words } = (await res.json()) as { text?: string; words?: Word[] }
-      const said = (text ?? '').trim()
+      let said = (text ?? '').trim()
       diag.lastError = ''
+
+      // "Yes, sir. Check my mail." — his reply caught on the front of the
+      // command. Keep only the user's part, and remember that the audio was a
+      // mixture so the voice lock can allow for it.
+      const glued = mode === 'command' ? leadingEcho(said, saidWithin(8000)) : null
+      if (glued) said = glued.rest
 
       if (!said) {
         drop('nothing intelligible in the segment')
@@ -548,8 +586,15 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
       diag.heard = said
       diag.heardAt = Date.now()
 
-      const v = await who
+      let v = await who
+      if (glued && !v.ok && v.score != null && v.score >= speaker.threshold() - MIXED_SLACK) {
+        v = { ...v, ok: true, why: 'your voice (mixed with his reply)' }
+      }
       diag.log.push({ text: said, mode, ok: v.ok, score: v.score, at: Date.now() })
+      console.info(
+        `[jarvis] voice: heard (${mode}) "${said}" · ${v.ok ? 'your voice' : 'NOT your voice'}` +
+          ` ${v.score == null ? '' : v.score.toFixed(2)}`,
+      )
       if (diag.log.length > 40) diag.log.shift()
       if (!v.ok) {
         drop(`ignored "${said.slice(-30)}" — ${verdict(v)}`)
